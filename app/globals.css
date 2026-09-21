@@ -1,0 +1,29 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body {
+  background: #fff7ef;
+  color: #3a2e2a;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+input:focus {
+  outline: none;
+}
+
+.tap {
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+.tap:active {
+  transform: scale(0.97);
+}
+@media (hover: hover) {
+  .tap-hover:hover {
+    transform: translateY(-3px);
+  }
+}
