@@ -1,4 +1,4 @@
-export default function ProgressRing({ percent, size = 44, stroke = 5, color = '#FF7A59', track = '#F3EEE6', showLabel = true, labelClass = 'text-[11px] font-display font-semibold fill-ink' }) {
+export default function ProgressRing({ percent, size = 44, stroke = 5, color = '#0B5CB8', track = '#EDF2F9', showLabel = true, labelClass = 'text-[11px] font-display font-semibold fill-ink' }) {
   const r = (size - stroke) / 2;
   const c = 2 * Math.PI * r;
   const dash = (percent / 100) * c;

@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { Check, Sparkles, Plus, X, Wand2 } from 'lucide-react';
 import Header from '@/components/Header';
 import Drawer from '@/components/Drawer';
+import UserMenu from '@/components/UserMenu';
 import { getChart, getSubgoal, suggestAction, suggestSubtaskPlan } from '@/lib/data';
 
 const LEGEND = [
@@ -95,18 +96,18 @@ export default function SubgoalPage({ params }) {
 
   return (
     <main className="min-h-dvh flex flex-col bg-cream">
-      <Header backHref={`/chart/${chart.id}`} title={subgoal.title} right={<span className="w-8 h-8 rounded-full bg-mint hidden sm:block" />} />
+      <Header backHref={`/chart/${chart.id}`} title={subgoal.title} right={<UserMenu className="hidden sm:block" />} />
 
       <div className="flex-1 overflow-y-auto px-4 md:px-10 py-5 md:py-8">
         <div className="max-w-3xl mx-auto flex flex-col gap-5">
           <div className="flex items-center gap-3 p-3.5 rounded-2xl bg-white shadow-soft self-start">
             <div className="grid grid-cols-3 gap-[3px]">
               {Array.from({ length: 9 }, (_, i) => {
-                let color = '#F3EEE6';
-                if (i === 4) color = '#FF7A59';
+                let color = '#EDF2F9';
+                if (i === 4) color = '#0B5CB8';
                 else {
                   const otherIndex = i < 4 ? i : i - 1;
-                  if (otherIndex === subIndex) color = '#B8A9FF';
+                  if (otherIndex === subIndex) color = '#1E9BE8';
                 }
                 return <div key={i} className="w-2 h-2 rounded-sm" style={{ background: color }} />;
               })}
@@ -170,7 +171,7 @@ export default function SubgoalPage({ params }) {
                   type="checkbox"
                   checked={active.status === 'done'}
                   onChange={(e) => updateAction(openIndex, { status: e.target.checked ? 'done' : active.label ? 'pending' : 'empty' })}
-                  className="w-5 h-5 rounded-md accent-[#FF7A59] flex-shrink-0"
+                  className="w-5 h-5 rounded-md accent-[#0B5CB8] flex-shrink-0"
                 />
                 <span className="text-sm font-semibold">ทำข้อนี้เสร็จแล้ว</span>
               </label>
@@ -233,7 +234,7 @@ export default function SubgoalPage({ params }) {
                     type="checkbox"
                     checked={s.done}
                     onChange={(e) => updateSubtask(openIndex, s.id, { done: e.target.checked })}
-                    className="w-[18px] h-[18px] rounded accent-[#FF7A59] flex-shrink-0"
+                    className="w-[18px] h-[18px] rounded accent-[#0B5CB8] flex-shrink-0"
                   />
                   <input
                     value={s.text}

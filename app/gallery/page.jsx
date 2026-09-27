@@ -7,6 +7,7 @@ import Header from '@/components/Header';
 import MiniHeatmap from '@/components/MiniHeatmap';
 import ProgressRing from '@/components/ProgressRing';
 import NotifyBell from '@/components/NotifyBell';
+import UserMenu from '@/components/UserMenu';
 import InstallPrompt from '@/components/InstallPrompt';
 import { CHARTS } from '@/lib/data';
 
@@ -89,7 +90,7 @@ export default function GalleryPage() {
             >
               <Plus size={18} strokeWidth={2.5} />
             </Link>
-            <span className="w-8 h-8 rounded-full bg-mint hidden sm:block" />
+            <UserMenu />
           </>
         }
       />

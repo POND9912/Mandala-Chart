@@ -1,6 +1,7 @@
 import { Fredoka, Quicksand } from 'next/font/google';
 import './globals.css';
 import ServiceWorkerRegister from '@/components/ServiceWorkerRegister';
+import Providers from '@/components/Providers';
 
 const fredoka = Fredoka({
   subsets: ['latin'],
@@ -23,7 +24,7 @@ export const metadata = {
 };
 
 export const viewport = {
-  themeColor: '#FF7A59',
+  themeColor: '#0A3D91',
 };
 
 export default function RootLayout({ children }) {
@@ -31,7 +32,7 @@ export default function RootLayout({ children }) {
     <html lang="th" className={`${fredoka.variable} ${quicksand.variable}`}>
       <body className="font-body bg-cream text-ink antialiased">
         <ServiceWorkerRegister />
-        {children}
+        <Providers>{children}</Providers>
       </body>
     </html>
   );

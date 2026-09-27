@@ -10,6 +10,12 @@ const BADGES = [
   { initial: 'D', label: '30 วันติด', bg: 'bg-chip', text: 'text-muted' },
 ];
 
+// Font grows linearly with progress: 12px at 0% → min(9vw, 44px) at 100%
+function percentFontSize(percent) {
+  const t = Math.min(Math.max(percent, 0), 100) / 100;
+  return `calc(12px + ${t} * (min(9vw, 44px) - 12px))`;
+}
+
 export default function ProgressPage({ params }) {
   const chart = getChart(params.id);
 
@@ -47,7 +53,9 @@ export default function ProgressPage({ params }) {
                     key="core"
                     className="aspect-square rounded-2xl bg-lavender-bg2 border-2 border-coral flex items-center justify-center"
                   >
-                    <span className="font-display font-semibold text-sm text-lavender-dark">{chart.percent}%</span>
+                    <span className="font-display font-semibold text-lavender-dark leading-none" style={{ fontSize: percentFontSize(chart.percent) }}>
+                      {chart.percent}%
+                    </span>
                   </div>
                 ) : (
                   <Link
@@ -56,7 +64,10 @@ export default function ProgressPage({ params }) {
                     className="tap aspect-square rounded-2xl flex items-center justify-center"
                     style={{ background: heatColorFor(s.percent) }}
                   >
-                    <span className={'font-display font-semibold text-sm ' + (s.percent >= 75 ? 'text-white' : 'text-ink')}>
+                    <span
+                      className={'font-display font-semibold leading-none ' + (s.percent >= 75 ? 'text-white' : 'text-ink')}
+                      style={{ fontSize: percentFontSize(s.percent) }}
+                    >
                       {s.percent}%
                     </span>
                   </Link>

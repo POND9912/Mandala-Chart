@@ -1,20 +1,27 @@
 import Link from 'next/link';
 import { Sparkles } from 'lucide-react';
+import { redirect } from 'next/navigation';
 import { ADMIN } from '@/lib/data';
+import { getSession } from '@/lib/auth';
+import UserMenu from '@/components/UserMenu';
 
 const NAV = ['ภาพรวม', 'หมวดหมู่ยอดนิยม', 'Expert Leaderboard', 'ผู้ใช้งาน', 'ตั้งค่า'];
 
-export default function AdminPage() {
+export default async function AdminPage() {
+  // Middleware already blocks non-admins; this re-checks on the server as defense in depth.
+  const session = await getSession();
+  if (session?.user?.role !== 'ADMIN') redirect('/gallery');
+
   const maxPct = Math.max(...ADMIN.categories.map((c) => c.percent));
 
   return (
     <main className="min-h-dvh flex flex-col md:flex-row bg-cream">
-      <aside className="hidden md:flex w-60 flex-shrink-0 bg-white flex-col justify-between p-4">
+      <aside className="hidden md:flex w-60 flex-shrink-0 bg-coral-dark text-white flex-col justify-between p-4">
         <div className="flex flex-col gap-7">
           <div className="flex items-center gap-2.5 px-2">
-            <span className="w-7 h-7 rounded-full bg-coral" />
+            <span className="w-7 h-7 rounded-full bg-lavender" />
             <span className="font-display font-semibold text-[15px]">Mandala AI</span>
-            <span className="text-[10px] font-bold text-muted bg-chip px-2 py-0.5 rounded-full">ADMIN</span>
+            <span className="text-[10px] font-bold text-white bg-white/15 px-2 py-0.5 rounded-full">ADMIN</span>
           </div>
           <nav className="flex flex-col gap-1">
             {NAV.map((label, i) => (
@@ -22,20 +29,20 @@ export default function AdminPage() {
                 key={label}
                 className={
                   'flex items-center gap-2.5 px-3 py-2.5 rounded-[14px] text-[13px] ' +
-                  (i === 0 ? 'bg-[#FFF0EA] text-coral font-bold' : 'text-[#4A4636] font-semibold')
+                  (i === 0 ? 'bg-white text-coral-dark font-bold' : 'text-white/80 font-semibold')
                 }
               >
-                <span className={'w-2 h-2 rounded-sm ' + (i === 0 ? 'bg-coral' : 'bg-line')} />
+                <span className={'w-2 h-2 rounded-sm ' + (i === 0 ? 'bg-coral' : 'bg-white/30')} />
                 {label}
               </span>
             ))}
           </nav>
         </div>
         <div className="flex items-center gap-2.5 px-2">
-          <span className="w-8 h-8 rounded-full bg-mint" />
-          <div>
-            <div className="text-xs font-bold">ผู้ดูแลระบบ</div>
-            <div className="text-[11px] text-muted">admin@mandala.ai</div>
+          <UserMenu up />
+          <div className="min-w-0">
+            <div className="text-xs font-bold truncate">{session.user.name || 'ผู้ดูแลระบบ'}</div>
+            <div className="text-[11px] text-white/60 truncate">{session.user.email}</div>
           </div>
         </div>
       </aside>

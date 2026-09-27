@@ -10,7 +10,7 @@ export default function Header({
   right,
 }) {
   return (
-    <header className="flex-shrink-0 h-16 bg-white flex items-center justify-between px-4 md:px-10 gap-3">
+    <header className="flex-shrink-0 h-16 bg-brand text-white shadow-softLg flex items-center justify-between px-4 md:px-10 gap-3">
       <div className="flex items-center gap-3 min-w-0">
         {backHref ? (
           <Link
@@ -22,7 +22,7 @@ export default function Header({
           </Link>
         ) : (
           <Link href={logoHref || '/gallery'} className="flex items-center gap-2.5">
-            <span className="w-7 h-7 rounded-full bg-coral flex-shrink-0" />
+            <span className="w-7 h-7 rounded-full bg-lavender ring-2 ring-white/80 flex-shrink-0" />
             <span className="font-display font-semibold text-base hidden sm:inline">Mandala AI</span>
           </Link>
         )}
@@ -39,8 +39,8 @@ export default function Header({
               href={n.href}
               className={
                 n.href === activeNav
-                  ? 'text-[13px] font-bold text-coral border-b-2 border-coral pb-1'
-                  : 'text-[13px] font-semibold text-muted'
+                  ? 'text-[13px] font-bold text-white border-b-2 border-white pb-1'
+                  : 'text-[13px] font-semibold text-white/70 hover:text-white'
               }
             >
               {n.label}

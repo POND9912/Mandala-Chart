@@ -3,6 +3,8 @@ import { Pencil, ChevronRight } from 'lucide-react';
 import Header from '@/components/Header';
 import ChartTabs from '@/components/ChartTabs';
 import ProgressRing from '@/components/ProgressRing';
+import HintDots from '@/components/HintDots';
+import UserMenu from '@/components/UserMenu';
 import { getChart } from '@/lib/data';
 
 export default function ChartHomePage({ params }) {
@@ -11,7 +13,7 @@ export default function ChartHomePage({ params }) {
 
   return (
     <main className="min-h-dvh flex flex-col bg-cream">
-      <Header backHref="/gallery" right={<span className="w-8 h-8 rounded-full bg-mint" />} />
+      <Header backHref="/gallery" right={<UserMenu />} />
 
       <div className="flex-1 overflow-y-auto px-4 md:px-10 py-5 md:py-8">
         <div className="max-w-5xl mx-auto flex flex-col gap-5">
@@ -42,19 +44,23 @@ export default function ChartHomePage({ params }) {
                     <span className="text-[10px] md:text-[11px] text-lavender-text">{core.percent}%</span>
                   </div>
                 ) : (
-                  <Link
-                    key={s.id}
-                    href={`/chart/${chart.id}/subgoal/${s.id}`}
-                    className="tap-hover tap aspect-square rounded-2xl bg-white shadow-soft p-2.5 md:p-3 flex flex-col justify-between"
-                  >
-                    <span className="text-[11px] md:text-[13px] font-semibold leading-tight">{s.title}</span>
-                    <span className="text-[10px] md:text-[11px] font-bold text-muted">{s.percent}%</span>
-                  </Link>
+                  <div key={s.id} className="relative">
+                    <Link
+                      href={`/chart/${chart.id}/subgoal/${s.id}`}
+                      className="tap-hover tap aspect-square rounded-2xl bg-white shadow-soft p-2.5 md:p-3 flex flex-col justify-between"
+                    >
+                      <span className="text-[11px] md:text-[13px] font-semibold leading-tight">{s.title}</span>
+                      <span className="text-[10px] md:text-[11px] font-bold text-muted">{s.percent}%</span>
+                    </Link>
+                    <div className="absolute inset-x-2.5 bottom-2.5 md:inset-x-3 md:bottom-3.5 flex justify-end pointer-events-none">
+                      <HintDots hints={s.hints} align={['left', 'center', 'right'][i % 3]} />
+                    </div>
+                  </div>
                 )
               )}
             </div>
 
-            <aside className="hidden lg:flex w-80 flex-shrink-0 flex-col gap-4">
+            <aside className="w-full lg:w-80 flex-shrink-0 grid md:grid-cols-2 lg:flex lg:flex-col gap-4 items-start">
               <div className="bg-lavender-bg rounded-[20px] p-5 flex flex-col gap-3.5">
                 <span className="text-[11px] font-bold tracking-wide text-lavender-text uppercase">AI Insight</span>
                 <RadarDecor />
@@ -85,11 +91,11 @@ export default function ChartHomePage({ params }) {
 function RadarDecor() {
   return (
     <svg width="100%" viewBox="0 0 180 180" aria-hidden="true" className="max-w-[160px] self-center">
-      <polygon points="90,10 147,33 170,90 147,147 90,170 33,147 10,90 33,33" fill="none" stroke="#DCD2F7" strokeWidth="1" />
+      <polygon points="90,10 147,33 170,90 147,147 90,170 33,147 10,90 33,33" fill="none" stroke="#C9DDF3" strokeWidth="1" />
       {[[90, 10], [147, 33], [170, 90], [147, 147], [90, 170], [33, 147], [10, 90], [33, 33]].map(([x, y], i) => (
-        <line key={i} x1="90" y1="90" x2={x} y2={y} stroke="#E4DAFA" strokeWidth="1" />
+        <line key={i} x1="90" y1="90" x2={x} y2={y} stroke="#DCE7F5" strokeWidth="1" />
       ))}
-      <polygon points="90,35 143,37 130,90 136,136 90,140 33,147 45,90 41,41" fill="#B8A9FF" fillOpacity="0.35" stroke="#B8A9FF" strokeWidth="1.5" />
+      <polygon points="90,35 143,37 130,90 136,136 90,140 33,147 45,90 41,41" fill="#1E9BE8" fillOpacity="0.35" stroke="#1E9BE8" strokeWidth="1.5" />
     </svg>
   );
 }

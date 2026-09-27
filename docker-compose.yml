@@ -1,0 +1,16 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: mandala
+      POSTGRES_PASSWORD: mandala
+      POSTGRES_DB: mandala
+    # 5434 on the host so it doesn't clash with a locally installed Postgres (5432/5433)
+    ports:
+      - '5434:5432'
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:
