@@ -7,7 +7,7 @@ datasource db {
   // Pooled connection for the app (serverless-friendly on Vercel/Neon)
   url       = env("DATABASE_URL")
   // Direct (unpooled) connection for migrations
-  directUrl = env("DIRECT_URL")
+  directUrl = env("DATABASE_URL_UNPOOLED")
 }
 
 enum Role {

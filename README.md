@@ -46,8 +46,8 @@ npm run dev
 ## Deploy to Vercel
 
 With the database: create a **Neon** Postgres from the Vercel project's
-Storage tab, then set env vars `DATABASE_URL` (pooled), `DIRECT_URL`
-(unpooled), `NEXTAUTH_SECRET` (fresh value), `NEXTAUTH_URL` (your production
+Storage tab (it sets `DATABASE_URL` and `DATABASE_URL_UNPOOLED` for you),
+then add `NEXTAUTH_SECRET` (fresh value), `NEXTAUTH_URL` (your production
 URL) and, for Google login, `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` plus
 the redirect URI `https://<your-domain>/api/auth/callback/google`.
 Vercel runs `npm run vercel-build`, which applies pending migrations before
