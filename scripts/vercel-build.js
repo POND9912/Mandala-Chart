@@ -12,6 +12,13 @@ if (!process.env.DATABASE_URL) {
   process.exit(1);
 }
 
+// NextAuth throws NO_SECRET on every request in production without this,
+// so fail the build instead of shipping a site that 500s.
+if (!process.env.NEXTAUTH_SECRET) {
+  console.error('NEXTAUTH_SECRET is not set — add it in Settings → Environment Variables, then redeploy.');
+  process.exit(1);
+}
+
 const source = CANDIDATES.find((name) => process.env[name]);
 process.env.DATABASE_URL_UNPOOLED = process.env[source];
 console.log(`Migrations will use ${source}`);
