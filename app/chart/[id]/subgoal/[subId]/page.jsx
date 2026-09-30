@@ -138,8 +138,8 @@ export default function SubgoalPage({ params }) {
               <ActionCell key={a.id} action={a} onOpen={() => setOpenIndex(i)} />
             ))}
             <div className="aspect-square rounded-2xl bg-lavender-bg2 flex flex-col items-center justify-center gap-1 p-2 text-center">
-              <span className="font-display font-semibold text-[13px] text-lavender-dark leading-tight">{subgoal.title}</span>
-              <span className="text-[11px] text-lavender-text">8 การกระทำ</span>
+              <span className="font-display font-semibold text-sm sm:text-base md:text-xl text-lavender-dark leading-snug">{subgoal.title}</span>
+              <span className="text-[11px] md:text-[13px] text-lavender-text">8 การกระทำ</span>
             </div>
             {last4.map((a, i) => (
               <ActionCell key={a.id} action={a} onOpen={() => setOpenIndex(i + 4)} />
@@ -299,40 +299,74 @@ export default function SubgoalPage({ params }) {
   );
 }
 
+// Outer cell: title on top, then the action's checklist (if it has one).
+// The cell is a button that opens the drawer, so the checklist here is read-only.
 function ActionCell({ action, onOpen }) {
   const status = effectiveStatus(action);
   const isEmpty = status === 'empty';
-  const subTotal = action.subtasks?.length || 0;
-  const subDone = subTotal ? action.subtasks.filter((s) => s.done).length : 0;
+  const subtasks = action.subtasks || [];
+  const subDone = subtasks.filter((s) => s.done).length;
 
   return (
     <button
       type="button"
       onClick={onOpen}
       className={
-        'tap aspect-square rounded-2xl p-2.5 flex flex-col justify-between text-left ' +
+        'tap aspect-square rounded-2xl p-2.5 md:p-3.5 flex flex-col gap-1.5 md:gap-2 text-left overflow-hidden ' +
         (isEmpty ? 'bg-white border-2 border-dashed border-line' : 'bg-white shadow-soft')
       }
     >
-      <div className="flex justify-end">
+      <div className="flex items-start justify-between gap-2">
+        <span
+          className={
+            'font-display font-semibold text-[12px] sm:text-sm md:text-base leading-snug line-clamp-3 ' +
+            (status === 'done' ? 'text-faint line-through decoration-1' : isEmpty ? 'text-muted' : 'text-ink')
+          }
+        >
+          {isEmpty ? '+ เพิ่ม action' : action.label}
+        </span>
         {status === 'done' ? (
-          <span className="w-[18px] h-[18px] rounded-full bg-coral flex items-center justify-center flex-shrink-0">
-            <Check size={10} strokeWidth={3} className="text-white" />
+          <span className="w-5 h-5 rounded-full bg-coral flex items-center justify-center flex-shrink-0">
+            <Check size={11} strokeWidth={3} className="text-white" />
           </span>
         ) : status === 'pending' ? (
-          <span className="w-[18px] h-[18px] rounded-full border-2 border-coral flex-shrink-0" />
+          <span className="w-5 h-5 rounded-full border-2 border-coral flex-shrink-0" />
         ) : (
-          <span className="text-[9px] font-bold text-lavender-text bg-lavender-bg px-2 py-0.5 rounded-full flex items-center gap-1">
+          <span className="text-[9px] font-bold text-lavender-text bg-lavender-bg px-2 py-0.5 rounded-full flex items-center gap-1 flex-shrink-0">
             <Sparkles size={9} /> AI
           </span>
         )}
       </div>
-      <div className="flex flex-col gap-0.5">
-        <span className={'text-[11px] font-semibold leading-snug ' + (status === 'done' ? 'text-faint' : isEmpty ? 'text-muted' : 'text-ink')}>
-          {isEmpty ? '+ เพิ่ม action' : action.label}
-        </span>
-        {subTotal > 0 && <span className="text-[10px] font-bold text-muted">{subDone}/{subTotal} ขั้นตอนย่อย</span>}
-      </div>
+
+      {subtasks.length > 0 && (
+        <>
+          <ul className="hidden sm:flex flex-col gap-1 flex-1 min-h-0 overflow-hidden">
+            {subtasks.map((st) => (
+              <li key={st.id} className="flex items-start gap-1.5 text-[11px] md:text-[12px] leading-snug">
+                <span
+                  className={
+                    'mt-[2px] w-3 h-3 rounded-[4px] flex-shrink-0 flex items-center justify-center ' +
+                    (st.done ? 'bg-coral' : 'border-[1.5px] border-faint')
+                  }
+                >
+                  {st.done && <Check size={8} strokeWidth={3.5} className="text-white" />}
+                </span>
+                <span className={'line-clamp-1 ' + (st.done ? 'text-faint line-through' : 'text-ink')}>
+                  {st.text || 'ขั้นตอนย่อย'}
+                </span>
+              </li>
+            ))}
+          </ul>
+          <div className="mt-auto flex items-center gap-1.5">
+            <div className="flex-1 h-1 rounded-full bg-chip overflow-hidden">
+              <div className="h-full bg-coral rounded-full" style={{ width: `${(subDone / subtasks.length) * 100}%` }} />
+            </div>
+            <span className="text-[10px] font-bold text-muted flex-shrink-0">
+              {subDone}/{subtasks.length}
+            </span>
+          </div>
+        </>
+      )}
     </button>
   );
 }

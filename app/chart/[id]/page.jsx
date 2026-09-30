@@ -5,11 +5,11 @@ import ChartTabs from '@/components/ChartTabs';
 import ProgressRing from '@/components/ProgressRing';
 import HintDots from '@/components/HintDots';
 import UserMenu from '@/components/UserMenu';
+import ShareButton from '@/components/ShareButton';
 import { getChart } from '@/lib/data';
 
 export default function ChartHomePage({ params }) {
   const chart = getChart(params.id);
-  const core = { title: 'เป้าหมายหลัก', percent: chart.percent };
 
   return (
     <main className="min-h-dvh flex flex-col bg-cream">
@@ -27,9 +27,12 @@ export default function ChartHomePage({ params }) {
                 <h1 className="font-display font-semibold text-base md:text-xl leading-snug">{chart.title}</h1>
               </div>
             </div>
-            <button type="button" aria-label="แก้ไขเป้าหมาย" className="w-8 h-8 rounded-full bg-chip flex items-center justify-center flex-shrink-0">
-              <Pencil size={13} className="text-muted" />
-            </button>
+            <div className="flex items-center gap-2 flex-shrink-0">
+              <ShareButton chartId={chart.id} initialPublic={Boolean(chart.isPublic)} copyCount={chart.copyCount || 0} />
+              <button type="button" aria-label="แก้ไขเป้าหมาย" className="w-8 h-8 rounded-full bg-chip flex items-center justify-center flex-shrink-0">
+                <Pencil size={13} className="text-muted" />
+              </button>
+            </div>
           </div>
 
           <div className="flex flex-col lg:flex-row gap-6 items-start">
@@ -38,18 +41,24 @@ export default function ChartHomePage({ params }) {
                 s === 'core' ? (
                   <div
                     key="core"
-                    className="aspect-square rounded-2xl bg-lavender-bg2 border-2 border-lavender flex flex-col items-center justify-center gap-1 p-2 text-center"
+                    className="aspect-square rounded-2xl bg-brand shadow-coral ring-4 ring-lavender/30 flex flex-col items-center justify-center gap-2 md:gap-3 p-3 md:p-5 text-center"
                   >
-                    <span className="text-[11px] md:text-xs font-bold text-lavender-dark">เป้าหมายหลัก</span>
-                    <span className="text-[10px] md:text-[11px] text-lavender-text">{core.percent}%</span>
+                    <span className="font-display font-semibold text-white text-[13px] sm:text-base md:text-2xl leading-snug line-clamp-4">
+                      {chart.title}
+                    </span>
+                    <span className="text-[10px] md:text-xs font-bold text-coral-dark bg-white px-2.5 py-0.5 md:py-1 rounded-full">
+                      {chart.percent}%
+                    </span>
                   </div>
                 ) : (
                   <div key={s.id} className="relative">
                     <Link
                       href={`/chart/${chart.id}/subgoal/${s.id}`}
-                      className="tap-hover tap aspect-square rounded-2xl bg-white shadow-soft p-2.5 md:p-3 flex flex-col justify-between"
+                      className="tap-hover tap aspect-square rounded-2xl bg-white shadow-soft p-2.5 md:p-4 flex flex-col"
                     >
-                      <span className="text-[11px] md:text-[13px] font-semibold leading-tight">{s.title}</span>
+                      <span className="flex-1 flex items-center justify-center text-center font-display font-semibold text-[12px] sm:text-sm md:text-lg leading-snug">
+                        {s.title}
+                      </span>
                       <span className="text-[10px] md:text-[11px] font-bold text-muted">{s.percent}%</span>
                     </Link>
                     <div className="absolute inset-x-2.5 bottom-2.5 md:inset-x-3 md:bottom-3.5 flex justify-end pointer-events-none">

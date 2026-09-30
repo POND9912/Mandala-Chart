@@ -1,0 +1,2575 @@
+diff --git a/.env.example b/.env.example
+index 5f52fb0..1ceecd0 100644
+--- a/.env.example
++++ b/.env.example
+@@ -15,3 +15,5 @@ GOOGLE_CLIENT_SECRET=""
+ # First admin account, created by `npm run db:seed`
+ ADMIN_EMAIL=""
+ ADMIN_PASSWORD=""
++# Also create sample charts for that admin (one public). Handy locally; leave false in production.
++SEED_SAMPLE_CHARTS="false"
+diff --git a/README.md b/README.md
+index 325665c..b3bf285 100644
+--- a/README.md
++++ b/README.md
+@@ -5,12 +5,12 @@ Chart overview → Sub-goal drill-down → Progress, plus the "New chart" AI-ass
+ creation flow and the Admin analytics dashboard. Fully responsive (one
+ codebase, Tailwind breakpoints — not separate mobile/desktop files).
+ 
+-**What's real vs. mocked:** All screens, navigation, and the responsive layout
+-are real. There is no backend yet — data lives in `lib/data.js`, "login" just
+-navigates to the gallery, and the "AI" buttons (generate sub-goals, generate
+-actions, regenerate) pick from a small local list of alternates instead of
+-calling a real model. Swap `lib/data.js` for real API calls when the backend
+-exists; the components don't need to change.
++**What's real vs. mocked:** Screens, auth (email/password + Google), roles and
++charts are real — each user's charts live in Postgres and autosave. Charts can
++be made public, viewed at `/p/[id]` without an account, listed on `/templates`
++and copied into another user's account. Still mocked: the "AI" buttons
++(generate sub-goals, actions, plans) pick from small local lists in
++`lib/data.js`, and the admin dashboard numbers are static.
+ 
+ ## Run locally
+ 
+@@ -78,18 +78,22 @@ app/
+   gallery/                       /gallery  (filter pills, card/compact toggle, collapsible "done")
+   new/                           /new              step 1 — enter goal
+   new/subgoals/                  /new/subgoals      step 2 — review AI sub-goals
+-  chart/[id]/                    /chart/fullstack           overview (3x3 grid)
+-  chart/[id]/subgoal/[subId]/    .../subgoal/ทักษะเขียนโค้ด  action plan
+-  chart/[id]/progress/           .../progress               heatmap, streak, badges
++  chart/[id]/                    /chart/<id>        overview (3x3 grid) + share toggle — owner only
++  chart/[id]/subgoal/[subId]/    .../subgoal/<id>   action plan, autosaves
++  chart/[id]/progress/           .../progress       heatmap, streak, badges
++  p/[id]/                        /p/<id>            public read-only view + "ใช้ Chart นี้" (copy)
++  templates/                     /templates         all public charts
++  actions/charts.js              server actions: create, share, copy, save action
+   admin/                         /admin            aggregate stats + expert leaderboard
+-components/                      shared Header, MiniHeatmap, ProgressRing, ChartTabs
+-lib/data.js                      all mock data + the "AI" mock helpers
++components/                      shared Header, MiniHeatmap, ProgressRing, ChartTabs, editors
++lib/charts.js                    chart queries (owner view vs. public view)
++lib/data.js                      static lists + the "AI" mock helpers
++prisma/                          schema, migrations, seed (+ sample-charts.js)
+ ```
+ 
+ ## Suggested next steps
+ 
+ - Real auth (NextAuth / Clerk / Supabase Auth) behind `/login`
+-- A database (Postgres via Prisma/Drizzle, or Supabase) replacing `lib/data.js`
+ - The Anthropic API for the actual sub-goal/action generation and the AI
+   insight copy on the overview and admin pages
+ - Aggregate-only queries for `/admin` so it never touches a user's raw chart
+@@ -111,9 +115,10 @@ backend to finish.
+   real OS-level notification using the exact selection logic described below
+   — this is a live demo of what a scheduled push would say, minus the
+   schedule.
+-- `randomDailyAction()` in `lib/data.js` is written so the demo and a future
+-  server-side cron job can share the same logic — swap its data source for
+-  a real DB query and the behavior stays identical.
++- `dailyActionCandidates()` in `lib/charts.js` (with the weighted pick in
++  `NotifyBell`) is written so the demo and a future
++  server-side cron job can share the same logic — it already reads from the
++  database, so a cron job only needs to call it per user.
+ 
+ ### iOS caveat
+ 
+diff --git a/app/actions/charts.js b/app/actions/charts.js
+new file mode 100644
+index 0000000..cfb2104
+--- /dev/null
++++ b/app/actions/charts.js
+@@ -0,0 +1,108 @@
++'use server';
++
++import { redirect } from 'next/navigation';
++import { revalidatePath } from 'next/cache';
++import { prisma } from '@/lib/prisma';
++import { getSession } from '@/lib/auth';
++import { chartCreateData, SLOTS } from '@/lib/charts';
++
++async function requireUserId() {
++  const session = await getSession();
++  if (!session?.user?.id) throw new Error('ต้องเข้าสู่ระบบก่อน');
++  return session.user.id;
++}
++
++const clean = (v, max) => String(v ?? '').trim().slice(0, max);
++
++export async function createChart({ title, category, subgoalTitles }) {
++  const userId = await requireUserId();
++  const t = clean(title, 200);
++  if (!t) throw new Error('กรุณาใส่เป้าหมายหลัก');
++  const titles = Array.from({ length: SLOTS }, (_, i) => clean(subgoalTitles?.[i], 120) || `หัวข้อย่อยที่ ${i + 1}`);
++
++  const chart = await prisma.chart.create({
++    data: chartCreateData({ ownerId: userId, title: t, category: clean(category, 60), subgoals: titles.map((title) => ({ title })) }),
++    select: { id: true },
++  });
++  redirect(`/chart/${chart.id}`);
++}
++
++export async function setChartPublic(chartId, isPublic) {
++  const userId = await requireUserId();
++  const { count } = await prisma.chart.updateMany({
++    where: { id: chartId, ownerId: userId },
++    data: { isPublic: Boolean(isPublic), publishedAt: isPublic ? new Date() : null },
++  });
++  if (count === 0) throw new Error('ไม่พบ Chart นี้');
++  revalidatePath(`/chart/${chartId}`);
++  revalidatePath('/templates');
++  return { isPublic: Boolean(isPublic) };
++}
++
++// Copies someone's public chart into the signed-in user's account as a fresh
++// start: same goal, sub-goals, actions and hints — but no progress, notes or
++// ticked sub-steps from the original owner.
++export async function copyPublicChart(chartId) {
++  const userId = await requireUserId();
++  const source = await prisma.chart.findFirst({
++    where: { id: chartId, isPublic: true },
++    include: { subgoals: { orderBy: { position: 'asc' }, include: { actions: { orderBy: { position: 'asc' } } } } },
++  });
++  if (!source) throw new Error('Chart นี้ไม่ได้เปิดเป็นสาธารณะแล้ว');
++
++  const copy = await prisma.$transaction(async (tx) => {
++    const created = await tx.chart.create({
++      data: chartCreateData({
++        ownerId: userId,
++        title: source.title,
++        category: source.category,
++        copiedFromId: source.id,
++        subgoals: source.subgoals.map((s) => ({
++          title: s.title,
++          passHint: s.passHint,
++          stuckHint: s.stuckHint,
++          actions: s.actions.map((a) => ({
++            label: a.label,
++            subtasks: (Array.isArray(a.subtasks) ? a.subtasks : []).map((st) => ({ ...st, done: false })),
++          })),
++        })),
++      }),
++      select: { id: true },
++    });
++    // Copying your own chart is allowed but shouldn't inflate its popularity.
++    if (source.ownerId !== userId) {
++      await tx.chart.update({ where: { id: source.id }, data: { copyCount: { increment: 1 } } });
++    }
++    return created;
++  });
++
++  revalidatePath('/gallery');
++  redirect(`/chart/${copy.id}`);
++}
++
++// Saves one action cell. Ownership is checked through subgoal → chart.
++export async function saveAction(actionId, patch) {
++  const userId = await requireUserId();
++  const action = await prisma.action.findFirst({
++    where: { id: actionId, subgoal: { chart: { ownerId: userId } } },
++    select: { id: true, subgoal: { select: { chartId: true } } },
++  });
++  if (!action) throw new Error('ไม่พบ action นี้');
++
++  const data = {};
++  if ('label' in patch) data.label = clean(patch.label, 300);
++  if ('note' in patch) data.note = clean(patch.note, 2000);
++  if ('status' in patch && ['empty', 'pending', 'done'].includes(patch.status)) data.status = patch.status.toUpperCase();
++  if ('subtasks' in patch && Array.isArray(patch.subtasks)) {
++    data.subtasks = patch.subtasks.slice(0, 30).map((s) => ({ id: String(s.id), text: clean(s.text, 200), done: Boolean(s.done) }));
++  }
++
++  await prisma.$transaction([
++    prisma.action.update({ where: { id: actionId }, data }),
++    // Touch the chart so "อัปเดตล่าสุด" and reminder weighting reflect activity.
++    prisma.chart.update({ where: { id: action.subgoal.chartId }, data: { updatedAt: new Date() } }),
++  ]);
++  // Drop cached renders (incl. the client router cache) so % is fresh on the way back.
++  revalidatePath(`/chart/${action.subgoal.chartId}`, 'layout');
++  revalidatePath('/gallery');
++}
+diff --git a/app/chart/[id]/page.jsx b/app/chart/[id]/page.jsx
+index b7663aa..ca93d2d 100644
+--- a/app/chart/[id]/page.jsx
++++ b/app/chart/[id]/page.jsx
+@@ -1,14 +1,19 @@
+ import Link from 'next/link';
++import { notFound } from 'next/navigation';
+ import { Pencil, ChevronRight } from 'lucide-react';
+ import Header from '@/components/Header';
+ import ChartTabs from '@/components/ChartTabs';
+ import ProgressRing from '@/components/ProgressRing';
+ import HintDots from '@/components/HintDots';
+ import UserMenu from '@/components/UserMenu';
+-import { getChart } from '@/lib/data';
++import ShareButton from '@/components/ShareButton';
++import { getSession } from '@/lib/auth';
++import { getOwnedChart } from '@/lib/charts';
+ 
+-export default function ChartHomePage({ params }) {
+-  const chart = getChart(params.id);
++export default async function ChartHomePage({ params }) {
++  const session = await getSession();
++  const chart = await getOwnedChart(params.id, session.user.id);
++  if (!chart) notFound();
+   const core = { title: 'เป้าหมายหลัก', percent: chart.percent };
+ 
+   return (
+@@ -27,9 +32,12 @@ export default function ChartHomePage({ params }) {
+                 <h1 className="font-display font-semibold text-base md:text-xl leading-snug">{chart.title}</h1>
+               </div>
+             </div>
+-            <button type="button" aria-label="แก้ไขเป้าหมาย" className="w-8 h-8 rounded-full bg-chip flex items-center justify-center flex-shrink-0">
+-              <Pencil size={13} className="text-muted" />
+-            </button>
++            <div className="flex items-center gap-2 flex-shrink-0">
++              <ShareButton chartId={chart.id} initialPublic={chart.isPublic} copyCount={chart.copyCount} />
++              <button type="button" aria-label="แก้ไขเป้าหมาย" className="w-8 h-8 rounded-full bg-chip flex items-center justify-center flex-shrink-0">
++                <Pencil size={13} className="text-muted" />
++              </button>
++            </div>
+           </div>
+ 
+           <div className="flex flex-col lg:flex-row gap-6 items-start">
+diff --git a/app/chart/[id]/progress/page.jsx b/app/chart/[id]/progress/page.jsx
+index 5dafd81..83e8856 100644
+--- a/app/chart/[id]/progress/page.jsx
++++ b/app/chart/[id]/progress/page.jsx
+@@ -1,7 +1,10 @@
+ import Link from 'next/link';
++import { notFound } from 'next/navigation';
+ import Header from '@/components/Header';
+ import ChartTabs from '@/components/ChartTabs';
+-import { getChart, heatColorFor } from '@/lib/data';
++import { heatColorFor } from '@/lib/data';
++import { getSession } from '@/lib/auth';
++import { getOwnedChart } from '@/lib/charts';
+ 
+ const BADGES = [
+   { initial: 'A', label: 'เริ่มต้นดี', bg: 'bg-lavender-bg2', text: 'text-lavender-dark' },
+@@ -16,8 +19,10 @@ function percentFontSize(percent) {
+   return `calc(12px + ${t} * (min(9vw, 44px) - 12px))`;
+ }
+ 
+-export default function ProgressPage({ params }) {
+-  const chart = getChart(params.id);
++export default async function ProgressPage({ params }) {
++  const session = await getSession();
++  const chart = await getOwnedChart(params.id, session.user.id);
++  if (!chart) notFound();
+ 
+   return (
+     <main className="min-h-dvh flex flex-col bg-cream">
+diff --git a/app/chart/[id]/subgoal/[subId]/page.jsx b/app/chart/[id]/subgoal/[subId]/page.jsx
+index 130b011..227b281 100644
+--- a/app/chart/[id]/subgoal/[subId]/page.jsx
++++ b/app/chart/[id]/subgoal/[subId]/page.jsx
+@@ -1,338 +1,14 @@
+-'use client';
+-
+-import { useState } from 'react';
+-import { Check, Sparkles, Plus, X, Wand2 } from 'lucide-react';
+-import Header from '@/components/Header';
+-import Drawer from '@/components/Drawer';
+-import UserMenu from '@/components/UserMenu';
+-import { getChart, getSubgoal, suggestAction, suggestSubtaskPlan } from '@/lib/data';
+-
+-const LEGEND = [
+-  { label: 'เสร็จแล้ว', dot: 'bg-coral' },
+-  { label: 'กำลังทำ', dot: 'bg-white border-2 border-coral' },
+-  { label: 'ยังไม่ได้เพิ่ม', dot: 'bg-white border-2 border-dashed border-line' },
+-];
+-
+-// When an action has sub-steps, its status is derived from them instead of
+-// being toggled directly — finish all the small steps and the box closes itself.
+-function effectiveStatus(action) {
+-  if (action.subtasks && action.subtasks.length > 0) {
+-    const doneN = action.subtasks.filter((s) => s.done).length;
+-    if (doneN === action.subtasks.length) return 'done';
+-    if (doneN > 0) return 'pending';
+-    return action.label ? 'pending' : 'empty';
+-  }
+-  return action.status;
+-}
+-
+-let subtaskSeq = 0;
+-function newSubtask() {
+-  subtaskSeq += 1;
+-  return { id: 'st' + subtaskSeq, text: '', done: false };
+-}
+-
+-export default function SubgoalPage({ params }) {
+-  const chart = getChart(params.id);
+-  const subgoal = getSubgoal(params.id, params.subId);
+-  const [actions, setActions] = useState(subgoal.actions.map((a) => ({ note: '', subtasks: [], ...a })));
+-  const [openIndex, setOpenIndex] = useState(null);
+-
+-  const doneCount = actions.filter((a) => effectiveStatus(a) === 'done').length;
+-  const subIndex = chart.subgoals.findIndex((s) => s.id === subgoal.id);
+-
+-  function updateAction(i, patch) {
+-    setActions((prev) => prev.map((a, idx) => (idx === i ? { ...a, ...patch } : a)));
+-  }
+-  function addSubtask(i) {
+-    setActions((prev) => prev.map((a, idx) => (idx === i ? { ...a, subtasks: [...a.subtasks, newSubtask()] } : a)));
+-  }
+-  function updateSubtask(i, subId, patch) {
+-    setActions((prev) =>
+-      prev.map((a, idx) =>
+-        idx === i ? { ...a, subtasks: a.subtasks.map((s) => (s.id === subId ? { ...s, ...patch } : s)) } : a
+-      )
+-    );
+-  }
+-  function removeSubtask(i, subId) {
+-    setActions((prev) =>
+-      prev.map((a, idx) => (idx === i ? { ...a, subtasks: a.subtasks.filter((s) => s.id !== subId) } : a))
+-    );
+-  }
+-
+-  // Big "manage the whole plan" button: make sure there's a topic, then
+-  // generate a fresh, right-sized checklist for it in one go.
+-  function aiManageWholePlan(i) {
+-    setActions((prev) =>
+-      prev.map((a, idx) => {
+-        if (idx !== i) return a;
+-        const label = a.label || suggestAction(idx);
+-        const plan = suggestSubtaskPlan().map((text) => ({ ...newSubtask(), text }));
+-        return { ...a, label, status: 'pending', subtasks: plan };
+-      })
+-    );
+-  }
+-
+-  // Gentler version: add a batch of AI-suggested steps onto whatever
+-  // checklist already exists, instead of replacing it.
+-  function aiAddSubtasks(i) {
+-    setActions((prev) =>
+-      prev.map((a, idx) => {
+-        if (idx !== i) return a;
+-        const extra = suggestSubtaskPlan().map((text) => ({ ...newSubtask(), text }));
+-        return { ...a, subtasks: [...a.subtasks, ...extra] };
+-      })
+-    );
+-  }
+-
+-  function fillAll() {
+-    setActions((prev) =>
+-      prev.map((a, idx) => (effectiveStatus(a) === 'empty' ? { ...a, status: 'pending', label: suggestAction(idx) } : a))
+-    );
+-  }
+-
+-  const first4 = actions.slice(0, 4);
+-  const last4 = actions.slice(4);
+-  const active = openIndex === null ? null : actions[openIndex];
+-
+-  return (
+-    <main className="min-h-dvh flex flex-col bg-cream">
+-      <Header backHref={`/chart/${chart.id}`} title={subgoal.title} right={<UserMenu className="hidden sm:block" />} />
+-
+-      <div className="flex-1 overflow-y-auto px-4 md:px-10 py-5 md:py-8">
+-        <div className="max-w-3xl mx-auto flex flex-col gap-5">
+-          <div className="flex items-center gap-3 p-3.5 rounded-2xl bg-white shadow-soft self-start">
+-            <div className="grid grid-cols-3 gap-[3px]">
+-              {Array.from({ length: 9 }, (_, i) => {
+-                let color = '#EDF2F9';
+-                if (i === 4) color = '#0B5CB8';
+-                else {
+-                  const otherIndex = i < 4 ? i : i - 1;
+-                  if (otherIndex === subIndex) color = '#1E9BE8';
+-                }
+-                return <div key={i} className="w-2 h-2 rounded-sm" style={{ background: color }} />;
+-              })}
+-            </div>
+-            <span className="text-xs font-semibold text-muted">ตำแหน่งของคุณในแผนทั้งหมด</span>
+-          </div>
+-
+-          <div className="flex flex-col gap-2">
+-            <h1 className="font-display font-semibold text-lg md:text-xl">{subgoal.title}</h1>
+-            <div className="h-3 rounded-full bg-chip overflow-hidden">
+-              <div className="h-full bg-coral rounded-full transition-all" style={{ width: `${(doneCount / 8) * 100}%` }} />
+-            </div>
+-            <div className="flex items-center justify-between flex-wrap gap-2">
+-              <span className="text-xs font-semibold text-muted">{doneCount} จาก 8 การกระทำเสร็จแล้ว</span>
+-              <div className="flex items-center gap-3.5">
+-                {LEGEND.map((l) => (
+-                  <span key={l.label} className="flex items-center gap-1.5 text-[11px] text-muted">
+-                    <span className={'w-2.5 h-2.5 rounded-full flex-shrink-0 ' + l.dot} />
+-                    {l.label}
+-                  </span>
+-                ))}
+-              </div>
+-            </div>
+-          </div>
+-
+-          <div className="grid grid-cols-3 gap-2.5">
+-            {first4.map((a, i) => (
+-              <ActionCell key={a.id} action={a} onOpen={() => setOpenIndex(i)} />
+-            ))}
+-            <div className="aspect-square rounded-2xl bg-lavender-bg2 flex flex-col items-center justify-center gap-1 p-2 text-center">
+-              <span className="font-display font-semibold text-[13px] text-lavender-dark leading-tight">{subgoal.title}</span>
+-              <span className="text-[11px] text-lavender-text">8 การกระทำ</span>
+-            </div>
+-            {last4.map((a, i) => (
+-              <ActionCell key={a.id} action={a} onOpen={() => setOpenIndex(i + 4)} />
+-            ))}
+-          </div>
+-
+-          <button
+-            type="button"
+-            onClick={fillAll}
+-            className="tap flex items-center justify-center gap-2 py-3.5 rounded-2xl bg-lavender shadow-lavenderGlow"
+-          >
+-            <Sparkles size={15} className="text-white" />
+-            <span className="font-display font-semibold text-sm text-white">ให้ AI ช่วยคิด action ที่เหลือ</span>
+-          </button>
+-        </div>
+-      </div>
+-
+-      <Drawer
+-        open={openIndex !== null}
+-        onClose={() => setOpenIndex(null)}
+-        subtitle={subgoal.title}
+-        title={`การกระทำข้อที่ ${openIndex !== null ? openIndex + 1 : ''}`}
+-      >
+-        {active && (
+-          <div className="flex flex-col gap-5">
+-            {active.subtasks.length === 0 ? (
+-              <label className="flex items-center gap-3 p-3.5 rounded-2xl bg-cream cursor-pointer">
+-                <input
+-                  type="checkbox"
+-                  checked={active.status === 'done'}
+-                  onChange={(e) => updateAction(openIndex, { status: e.target.checked ? 'done' : active.label ? 'pending' : 'empty' })}
+-                  className="w-5 h-5 rounded-md accent-[#0B5CB8] flex-shrink-0"
+-                />
+-                <span className="text-sm font-semibold">ทำข้อนี้เสร็จแล้ว</span>
+-              </label>
+-            ) : (
+-              <div className="p-3.5 rounded-2xl bg-cream flex items-center justify-between">
+-                <span className="text-sm font-semibold">
+-                  {active.subtasks.filter((s) => s.done).length} จาก {active.subtasks.length} ขั้นตอนย่อยเสร็จแล้ว
+-                </span>
+-                {effectiveStatus(active) === 'done' && (
+-                  <span className="w-6 h-6 rounded-full bg-coral flex items-center justify-center flex-shrink-0">
+-                    <Check size={12} strokeWidth={3} className="text-white" />
+-                  </span>
+-                )}
+-              </div>
+-            )}
+-
+-            <div className="flex flex-col gap-2">
+-              <span className="text-[11px] font-bold text-muted">รายละเอียด action</span>
+-              <textarea
+-                value={active.label}
+-                onChange={(e) =>
+-                  updateAction(openIndex, {
+-                    label: e.target.value,
+-                    status: e.target.value ? (active.status === 'empty' ? 'pending' : active.status) : 'empty',
+-                  })
+-                }
+-                placeholder="พิมพ์สิ่งที่จะทำ เช่น อ่าน docs React 15 นาที"
+-                rows={3}
+-                className="w-full bg-white border border-line rounded-2xl p-3.5 text-sm font-semibold placeholder:text-faint placeholder:font-medium resize-none shadow-soft"
+-              />
+-              <button
+-                type="button"
+-                onClick={() => updateAction(openIndex, { label: suggestAction(openIndex), status: 'pending' })}
+-                className="tap self-start flex items-center gap-2 px-3.5 py-2 rounded-full bg-lavender-bg"
+-              >
+-                <Sparkles size={12} className="text-lavender-text" />
+-                <span className="text-[12px] font-bold text-lavender-text">ให้ AI แนะนำให้</span>
+-              </button>
+-              <button
+-                type="button"
+-                onClick={() => aiManageWholePlan(openIndex)}
+-                className="tap flex items-center justify-center gap-2 py-3 rounded-2xl bg-lavender shadow-lavenderGlow"
+-              >
+-                <Wand2 size={14} className="text-white" />
+-                <span className="font-display font-semibold text-[13px] text-white">ให้ AI จัดการแผนทั้งหมด</span>
+-              </button>
+-              <span className="text-[11px] text-faint -mt-1">ใส่แค่หัวข้อด้านบน แล้วให้ AI คิดทั้ง description และขั้นตอนย่อยให้ครบ</span>
+-            </div>
+-
+-            <div className="flex flex-col gap-2.5">
+-              <div className="flex items-center justify-between">
+-                <span className="text-[11px] font-bold text-muted">
+-                  ขั้นตอนย่อย {active.subtasks.length > 0 ? `(${active.subtasks.length})` : '(ถ้าต้องการแบ่งเป็นหลายขั้น)'}
+-                </span>
+-              </div>
+-
+-              {active.subtasks.map((s) => (
+-                <div key={s.id} className="flex items-center gap-2.5">
+-                  <input
+-                    type="checkbox"
+-                    checked={s.done}
+-                    onChange={(e) => updateSubtask(openIndex, s.id, { done: e.target.checked })}
+-                    className="w-[18px] h-[18px] rounded accent-[#0B5CB8] flex-shrink-0"
+-                  />
+-                  <input
+-                    value={s.text}
+-                    onChange={(e) => updateSubtask(openIndex, s.id, { text: e.target.value })}
+-                    placeholder="พิมพ์ขั้นตอนย่อย"
+-                    className={
+-                      'flex-1 min-w-0 bg-transparent text-[13px] font-semibold placeholder:text-faint placeholder:font-medium ' +
+-                      (s.done ? 'line-through text-faint' : 'text-ink')
+-                    }
+-                  />
+-                  <button
+-                    type="button"
+-                    aria-label="ลบขั้นตอนนี้"
+-                    onClick={() => removeSubtask(openIndex, s.id)}
+-                    className="tap flex-shrink-0 w-6 h-6 rounded-full bg-chip flex items-center justify-center"
+-                  >
+-                    <X size={11} className="text-muted" />
+-                  </button>
+-                </div>
+-              ))}
+-
+-              <div className="flex items-center gap-4">
+-                <button
+-                  type="button"
+-                  onClick={() => addSubtask(openIndex)}
+-                  className="tap flex items-center gap-1.5 text-[12px] font-bold text-muted"
+-                >
+-                  <Plus size={13} /> เพิ่มขั้นตอนย่อย
+-                </button>
+-                <button
+-                  type="button"
+-                  onClick={() => aiAddSubtasks(openIndex)}
+-                  className="tap flex items-center gap-1.5 text-[12px] font-bold text-lavender-text"
+-                >
+-                  <Sparkles size={12} /> ให้ AI ช่วยคิดเพิ่ม
+-                </button>
+-              </div>
+-            </div>
+-
+-            <div className="flex flex-col gap-2">
+-              <span className="text-[11px] font-bold text-muted">บันทึกเพิ่มเติม (ถ้ามี)</span>
+-              <textarea
+-                value={active.note}
+-                onChange={(e) => updateAction(openIndex, { note: e.target.value })}
+-                placeholder="เช่น ลิงก์อ้างอิง หรือเหตุผลที่ตั้งข้อนี้"
+-                rows={2}
+-                className="w-full bg-cream rounded-2xl p-3.5 text-[13px] placeholder:text-faint resize-none"
+-              />
+-            </div>
+-
+-            <button
+-              type="button"
+-              onClick={() => setOpenIndex(null)}
+-              className="tap flex items-center justify-center py-3.5 rounded-2xl bg-coral shadow-coral mt-1"
+-            >
+-              <span className="font-display font-semibold text-sm text-white">เสร็จสิ้น</span>
+-            </button>
+-          </div>
+-        )}
+-      </Drawer>
+-    </main>
+-  );
+-}
+-
+-function ActionCell({ action, onOpen }) {
+-  const status = effectiveStatus(action);
+-  const isEmpty = status === 'empty';
+-  const subTotal = action.subtasks?.length || 0;
+-  const subDone = subTotal ? action.subtasks.filter((s) => s.done).length : 0;
+-
+-  return (
+-    <button
+-      type="button"
+-      onClick={onOpen}
+-      className={
+-        'tap aspect-square rounded-2xl p-2.5 flex flex-col justify-between text-left ' +
+-        (isEmpty ? 'bg-white border-2 border-dashed border-line' : 'bg-white shadow-soft')
+-      }
+-    >
+-      <div className="flex justify-end">
+-        {status === 'done' ? (
+-          <span className="w-[18px] h-[18px] rounded-full bg-coral flex items-center justify-center flex-shrink-0">
+-            <Check size={10} strokeWidth={3} className="text-white" />
+-          </span>
+-        ) : status === 'pending' ? (
+-          <span className="w-[18px] h-[18px] rounded-full border-2 border-coral flex-shrink-0" />
+-        ) : (
+-          <span className="text-[9px] font-bold text-lavender-text bg-lavender-bg px-2 py-0.5 rounded-full flex items-center gap-1">
+-            <Sparkles size={9} /> AI
+-          </span>
+-        )}
+-      </div>
+-      <div className="flex flex-col gap-0.5">
+-        <span className={'text-[11px] font-semibold leading-snug ' + (status === 'done' ? 'text-faint' : isEmpty ? 'text-muted' : 'text-ink')}>
+-          {isEmpty ? '+ เพิ่ม action' : action.label}
+-        </span>
+-        {subTotal > 0 && <span className="text-[10px] font-bold text-muted">{subDone}/{subTotal} ขั้นตอนย่อย</span>}
+-      </div>
+-    </button>
+-  );
++import { notFound } from 'next/navigation';
++import SubgoalEditor from '@/components/SubgoalEditor';
++import { getSession } from '@/lib/auth';
++import { getOwnedChart } from '@/lib/charts';
++
++export default async function SubgoalPage({ params }) {
++  const session = await getSession();
++  const chart = await getOwnedChart(params.id, session.user.id);
++  const subIndex = chart ? chart.subgoals.findIndex((s) => s.id === params.subId) : -1;
++  if (subIndex === -1) notFound();
++
++  const { hints, ...subgoal } = chart.subgoals[subIndex];
++  return <SubgoalEditor chartId={chart.id} subgoal={subgoal} subIndex={subIndex} />;
+ }
+diff --git a/app/gallery/page.jsx b/app/gallery/page.jsx
+index e5f39c3..e59308f 100644
+--- a/app/gallery/page.jsx
++++ b/app/gallery/page.jsx
+@@ -1,166 +1,15 @@
+-'use client';
++import GalleryView from '@/components/GalleryView';
++import { getSession } from '@/lib/auth';
++import { dailyActionCandidates, getUserCharts, timeAgo } from '@/lib/charts';
+ 
+-import { useMemo, useState } from 'react';
+-import Link from 'next/link';
+-import { Plus, LayoutGrid, Rows3, ChevronRight, ChevronDown, Sparkles } from 'lucide-react';
+-import Header from '@/components/Header';
+-import MiniHeatmap from '@/components/MiniHeatmap';
+-import ProgressRing from '@/components/ProgressRing';
+-import NotifyBell from '@/components/NotifyBell';
+-import UserMenu from '@/components/UserMenu';
+-import InstallPrompt from '@/components/InstallPrompt';
+-import { CHARTS } from '@/lib/data';
++export default async function GalleryPage() {
++  const session = await getSession();
++  const charts = await getUserCharts(session.user.id);
+ 
+-const FILTERS = [
+-  { id: 'active', label: 'กำลังทำ' },
+-  { id: 'all', label: 'ทั้งหมด' },
+-  { id: 'done', label: 'เสร็จแล้ว' },
+-];
+-
+-function ChartCard({ chart, view, seed }) {
+-  if (view === 'compact') {
+-    return (
+-      <Link
+-        href={`/chart/${chart.id}`}
+-        className="tap flex items-center gap-3 py-3 border-b border-line"
+-      >
+-        <ProgressRing percent={chart.percent} size={34} stroke={4} showLabel={false} />
+-        <div className="flex-1 min-w-0">
+-          <div className="text-[13px] font-semibold truncate">{chart.title}</div>
+-          <div className="text-[10.5px] text-muted">{chart.category} • อัปเดต {chart.updated}</div>
+-        </div>
+-        <span className="flex-shrink-0 text-[13px] font-bold text-muted">{chart.percent}%</span>
+-      </Link>
+-    );
+-  }
+   return (
+-    <Link
+-      href={`/chart/${chart.id}`}
+-      className="tap-hover tap flex items-center gap-4 md:gap-5 p-4 md:p-5 rounded-[20px] bg-white shadow-soft"
+-    >
+-      <div className="flex-1 min-w-0 flex flex-col gap-1.5">
+-        <span className="self-start text-[10px] font-bold text-muted bg-chip px-2.5 py-0.5 rounded-full">
+-          {chart.category}
+-        </span>
+-        <span className="font-display font-semibold text-sm md:text-[15px] leading-snug">{chart.title}</span>
+-        <div className="flex items-center gap-2">
+-          <div className="flex-1 h-1.5 rounded-full bg-chip overflow-hidden">
+-            <div className="h-full bg-coral rounded-full" style={{ width: `${chart.percent}%` }} />
+-          </div>
+-          <span className="text-[11px] font-bold text-muted">{chart.percent}%</span>
+-        </div>
+-        <span className="text-[10px] text-faint">อัปเดต {chart.updated}</span>
+-      </div>
+-      <MiniHeatmap seed={seed} />
+-    </Link>
+-  );
+-}
+-
+-export default function GalleryPage() {
+-  const [filter, setFilter] = useState('active');
+-  const [view, setView] = useState('card');
+-  const [doneOpen, setDoneOpen] = useState(false);
+-
+-  const active = useMemo(() => CHARTS.filter((c) => c.status === 'active'), []);
+-  const done = useMemo(() => CHARTS.filter((c) => c.status === 'done'), []);
+-
+-  const shown = filter === 'active' ? active : filter === 'done' ? done : CHARTS;
+-
+-  return (
+-    <main className="min-h-dvh flex flex-col bg-cream">
+-      <Header
+-        logoHref="/gallery"
+-        navLinks={[{ href: '/gallery', label: 'Chart ของฉัน' }, { href: '#', label: 'เทมเพลต' }, { href: '#', label: 'การตั้งค่า' }]}
+-        activeNav="/gallery"
+-        right={
+-          <>
+-            <NotifyBell />
+-            <button
+-              type="button"
+-              aria-label="สลับมุมมอง"
+-              onClick={() => setView((v) => (v === 'card' ? 'compact' : 'card'))}
+-              className="w-9 h-9 rounded-full bg-chip flex items-center justify-center"
+-            >
+-              {view === 'card' ? <Rows3 size={16} className="text-muted" /> : <LayoutGrid size={16} className="text-muted" />}
+-            </button>
+-            <Link
+-              href="/new"
+-              aria-label="สร้างเป้าหมายใหม่"
+-              className="w-9 h-9 rounded-full bg-coral text-white flex items-center justify-center shadow-coral"
+-            >
+-              <Plus size={18} strokeWidth={2.5} />
+-            </Link>
+-            <UserMenu />
+-          </>
+-        }
+-      />
+-
+-      <div className="flex-1 overflow-y-auto px-4 md:px-10 py-5 md:py-8">
+-        <div className="max-w-5xl mx-auto flex flex-col gap-5">
+-          <div className="flex items-center justify-between flex-wrap gap-3">
+-            <div>
+-              <h1 className="font-display font-semibold text-xl md:text-2xl">Mandala Chart ของฉัน</h1>
+-              <p className="text-[13px] text-muted mt-1">คุณมีทั้งหมด {CHARTS.length} เป้าหมาย</p>
+-            </div>
+-            <div className="flex gap-2">
+-              {FILTERS.map((f) => (
+-                <button
+-                  key={f.id}
+-                  type="button"
+-                  onClick={() => setFilter(f.id)}
+-                  className={
+-                    'text-xs font-bold px-4 py-2 rounded-full ' +
+-                    (filter === f.id ? 'bg-coral text-white' : 'bg-chip text-muted')
+-                  }
+-                >
+-                  {f.label}
+-                </button>
+-              ))}
+-            </div>
+-          </div>
+-
+-          <InstallPrompt />
+-
+-          <Link
+-            href="/new"
+-            className="tap flex items-center gap-3 p-4 rounded-[20px] bg-lavender-bg"
+-          >
+-            <span className="w-10 h-10 rounded-full bg-lavender text-white flex items-center justify-center flex-shrink-0">
+-              <Sparkles size={18} />
+-            </span>
+-            <div>
+-              <div className="font-display font-semibold text-sm text-lavender-dark">สร้างเป้าหมายใหม่</div>
+-              <div className="text-xs text-lavender-text">ให้ AI ช่วยวางแผนตั้งแต่ต้น</div>
+-            </div>
+-          </Link>
+-
+-          <div className={view === 'card' ? 'grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4' : 'flex flex-col'}>
+-            {shown.map((c, i) => (
+-              <ChartCard key={c.id} chart={c} view={view} seed={i * 3} />
+-            ))}
+-          </div>
+-
+-          {filter === 'active' && done.length > 0 && (
+-            <div className="rounded-2xl bg-chip overflow-hidden">
+-              <button
+-                type="button"
+-                onClick={() => setDoneOpen((v) => !v)}
+-                className="w-full flex items-center justify-between px-4 py-3.5"
+-              >
+-                <span className="text-[13px] font-bold text-muted">เสร็จแล้ว ({done.length})</span>
+-                {doneOpen ? <ChevronDown size={16} className="text-muted" /> : <ChevronRight size={16} className="text-muted" />}
+-              </button>
+-              {doneOpen && (
+-                <div className={'px-4 pb-4 ' + (view === 'card' ? 'grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4' : 'flex flex-col')}>
+-                  {done.map((c, i) => (
+-                    <ChartCard key={c.id} chart={c} view={view} seed={i * 3 + 9} />
+-                  ))}
+-                </div>
+-              )}
+-            </div>
+-          )}
+-        </div>
+-      </div>
+-    </main>
++    <GalleryView
++      charts={charts.map(({ subgoals, ...c }) => ({ ...c, updated: timeAgo(c.updatedAt) }))}
++      reminderCandidates={dailyActionCandidates(charts)}
++    />
+   );
+ }
+diff --git a/app/new/subgoals/page.jsx b/app/new/subgoals/page.jsx
+index 5494093..67f3ba2 100644
+--- a/app/new/subgoals/page.jsx
++++ b/app/new/subgoals/page.jsx
+@@ -1,16 +1,19 @@
+ 'use client';
+ 
+-import { Suspense, useState } from 'react';
+-import Link from 'next/link';
++import { Suspense, useState, useTransition } from 'react';
+ import { useSearchParams } from 'next/navigation';
+-import { RefreshCw, Sparkles } from 'lucide-react';
++import { Loader2, RefreshCw, Sparkles } from 'lucide-react';
+ import Header from '@/components/Header';
+ import { SUBGOAL_TITLES, regenerateSubgoal } from '@/lib/data';
++import { createChart } from '@/app/actions/charts';
+ 
+ function Step2Inner() {
+   const params = useSearchParams();
+   const goalTitle = params.get('title') || 'เป้าหมายของคุณ';
++  const category = params.get('category') || '';
+   const mode = params.get('mode') === 'manual' ? 'manual' : 'ai';
++  const [saving, startSaving] = useTransition();
++  const [error, setError] = useState('');
+ 
+   const [subgoals, setSubgoals] = useState(mode === 'manual' ? Array(8).fill('') : SUBGOAL_TITLES.slice());
+ 
+@@ -25,6 +28,18 @@ function Step2Inner() {
+   function editOne(i, value) {
+     setSubgoals((prev) => prev.map((t, idx) => (idx === i ? value : t)));
+   }
++  function save() {
++    setError('');
++    startSaving(async () => {
++      try {
++        // Redirects to the new chart on success.
++        await createChart({ title: goalTitle, category, subgoalTitles: subgoals });
++      } catch (e) {
++        if (e?.digest?.startsWith('NEXT_REDIRECT')) throw e;
++        setError('บันทึกไม่สำเร็จ ลองใหม่อีกครั้ง');
++      }
++    });
++  }
+ 
+   const cells = [...subgoals.slice(0, 4), 'core', ...subgoals.slice(4)];
+   let subIndex = -1;
+@@ -139,12 +154,16 @@ function Step2Inner() {
+             </p>
+           </div>
+ 
+-          <Link
+-            href="/chart/fullstack"
+-            className="tap flex items-center justify-center py-4 rounded-2xl bg-coral shadow-coral max-w-md"
++          {error && <p role="alert" className="text-[12.5px] font-semibold text-red-600">{error}</p>}
++          <button
++            type="button"
++            onClick={save}
++            disabled={saving}
++            className="tap flex items-center justify-center gap-2 py-4 rounded-2xl bg-coral shadow-coral max-w-md disabled:opacity-70"
+           >
+-            <span className="font-display font-semibold text-sm text-white">ดูภาพรวม Mandala Chart →</span>
+-          </Link>
++            {saving && <Loader2 size={16} className="animate-spin text-white" />}
++            <span className="font-display font-semibold text-sm text-white">สร้าง Mandala Chart →</span>
++          </button>
+         </div>
+       </div>
+     </main>
+diff --git a/app/p/[id]/page.jsx b/app/p/[id]/page.jsx
+new file mode 100644
+index 0000000..2d53ba1
+--- /dev/null
++++ b/app/p/[id]/page.jsx
+@@ -0,0 +1,158 @@
++import Link from 'next/link';
++import { notFound } from 'next/navigation';
++import { ChevronDown, CopyPlus, Flag, Users } from 'lucide-react';
++import Header from '@/components/Header';
++import ProgressRing from '@/components/ProgressRing';
++import UserMenu from '@/components/UserMenu';
++import CopyChartButton from '@/components/CopyChartButton';
++import { heatColorFor } from '@/lib/data';
++import { getSession } from '@/lib/auth';
++import { getPublicChart } from '@/lib/charts';
++
++export async function generateMetadata({ params }) {
++  const chart = await getPublicChart(params.id);
++  if (!chart) return { title: 'ไม่พบ Chart — Mandala AI' };
++  return {
++    title: `${chart.title} — Mandala AI`,
++    description: `Mandala Chart ของ ${chart.ownerName}: ${chart.subgoals.map((s) => s.title).join(', ')}`,
++  };
++}
++
++// Public, read-only view of a shared chart. Viewable without signing in;
++// copying needs an account.
++export default async function PublicChartPage({ params }) {
++  const [chart, session] = await Promise.all([getPublicChart(params.id), getSession()]);
++  if (!chart) notFound();
++
++  const userId = session?.user?.id;
++  const isOwner = userId === chart.ownerId;
++  const loginHref = `/login?callbackUrl=${encodeURIComponent(`/p/${chart.id}`)}`;
++
++  const cta = isOwner ? (
++    <Link href={`/chart/${chart.id}`} className="tap flex items-center justify-center px-5 py-3.5 rounded-2xl bg-chip text-sm font-bold">
++      นี่คือ Chart ของคุณ — ไปหน้าจัดการ
++    </Link>
++  ) : userId ? (
++    <CopyChartButton chartId={chart.id} />
++  ) : (
++    <Link href={loginHref} className="tap flex items-center justify-center gap-2 px-5 py-3.5 rounded-2xl bg-coral shadow-coral text-white">
++      <CopyPlus size={16} />
++      <span className="font-display font-semibold text-sm">เข้าสู่ระบบเพื่อใช้ Chart นี้</span>
++    </Link>
++  );
++
++  return (
++    <main className="min-h-dvh flex flex-col bg-cream">
++      <Header
++        logoHref={userId ? '/gallery' : '/login'}
++        navLinks={userId ? [{ href: '/gallery', label: 'Chart ของฉัน' }, { href: '/templates', label: 'เทมเพลต' }] : null}
++        activeNav="/templates"
++        right={
++          userId ? (
++            <UserMenu />
++          ) : (
++            <Link href={loginHref} className="text-[13px] font-bold px-4 py-2 rounded-full bg-white text-coral-dark">
++              เข้าสู่ระบบ
++            </Link>
++          )
++        }
++      />
++
++      <div className="flex-1 overflow-y-auto px-4 md:px-10 py-5 md:py-8">
++        <div className="max-w-5xl mx-auto flex flex-col gap-6">
++          <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
++            <div className="flex items-center gap-3 min-w-0">
++              <ProgressRing percent={chart.percent} />
++              <div className="min-w-0">
++                <div className="flex items-center gap-2 flex-wrap text-[11px] font-semibold text-muted">
++                  <span>Chart สาธารณะของ {chart.ownerName}</span>
++                  {chart.category && <span className="bg-chip px-2 py-0.5 rounded-full">{chart.category}</span>}
++                </div>
++                <h1 className="font-display font-semibold text-lg md:text-2xl leading-snug">{chart.title}</h1>
++                <div className="flex items-center gap-3 mt-1 text-[11px] text-muted">
++                  <span>เจ้าของทำไปแล้ว {chart.percent}%</span>
++                  <span className="flex items-center gap-1">
++                    <Users size={11} /> นำไปใช้แล้ว {chart.copyCount} ครั้ง
++                  </span>
++                </div>
++              </div>
++            </div>
++            <div className="md:w-72 flex-shrink-0">{cta}</div>
++          </div>
++
++          <div className="grid grid-cols-3 gap-2.5 md:gap-4">
++            {[...chart.subgoals.slice(0, 4), 'core', ...chart.subgoals.slice(4)].map((s) =>
++              s === 'core' ? (
++                <div
++                  key="core"
++                  className="aspect-square rounded-2xl bg-lavender-bg2 border-2 border-lavender flex flex-col items-center justify-center gap-1 p-2 text-center"
++                >
++                  <span className="text-[11px] md:text-[13px] font-bold text-lavender-dark leading-tight line-clamp-4">{chart.title}</span>
++                  <span className="text-[10px] md:text-[11px] text-lavender-text">{chart.percent}%</span>
++                </div>
++              ) : (
++                <a
++                  key={s.id}
++                  href={`#sg-${s.id}`}
++                  className="tap aspect-square rounded-2xl p-2.5 md:p-3 flex flex-col justify-between"
++                  style={{ background: heatColorFor(s.percent) }}
++                >
++                  <span className={'text-[11px] md:text-[13px] font-semibold leading-tight ' + (s.percent >= 75 ? 'text-white' : 'text-ink')}>
++                    {s.title}
++                  </span>
++                  <span className={'text-[10px] md:text-[11px] font-bold ' + (s.percent >= 75 ? 'text-white/90' : 'text-muted')}>
++                    {s.percent}%
++                  </span>
++                </a>
++              )
++            )}
++          </div>
++
++          <div className="flex flex-col gap-2.5">
++            <h2 className="font-display font-semibold text-sm">หัวข้อย่อยและ action</h2>
++            {chart.subgoals.map((s, i) => (
++              <details key={s.id} id={`sg-${s.id}`} className="group bg-white rounded-2xl shadow-soft scroll-mt-4">
++                <summary className="flex items-center gap-3 p-4 cursor-pointer list-none">
++                  <span className="w-6 h-6 rounded-full bg-chip flex items-center justify-center text-[10px] font-bold text-muted flex-shrink-0">
++                    {i + 1}
++                  </span>
++                  <span className="flex-1 min-w-0 text-[13px] font-bold truncate">{s.title}</span>
++                  <span className="text-[11px] font-bold text-muted">{s.actions.length} action</span>
++                  <ChevronDown size={15} className="text-muted transition-transform group-open:rotate-180" />
++                </summary>
++                <div className="px-4 pb-4 flex flex-col gap-2.5">
++                  {s.passHint && (
++                    <div className="flex items-start gap-2 p-3 rounded-xl bg-lavender-bg text-[12px]">
++                      <Flag size={13} className="text-lavender-text mt-0.5 flex-shrink-0" />
++                      <span>
++                        <span className="font-bold text-lavender-text">วิธีผ่าน: </span>
++                        {s.passHint}
++                      </span>
++                    </div>
++                  )}
++                  {s.actions.length === 0 ? (
++                    <span className="text-[12px] text-faint">ยังไม่มี action</span>
++                  ) : (
++                    <ol className="flex flex-col gap-1.5">
++                      {s.actions.map((a, j) => (
++                        <li key={a.id} className="flex gap-2.5 text-[13px]">
++                          <span className="text-faint font-bold w-4 text-right flex-shrink-0">{j + 1}.</span>
++                          <span>{a.label}</span>
++                        </li>
++                      ))}
++                    </ol>
++                  )}
++                </div>
++              </details>
++            ))}
++          </div>
++
++          <div className="md:hidden">{cta}</div>
++          <p className="text-[11px] text-faint text-center">
++            เมื่อกด &ldquo;ใช้ Chart นี้&rdquo; คุณจะได้สำเนาของเป้าหมาย หัวข้อย่อย และ action ทั้งหมดไปเริ่มนับความคืบหน้าใหม่ในบัญชีของคุณ
++          </p>
++        </div>
++      </div>
++    </main>
++  );
++}
+diff --git a/app/templates/page.jsx b/app/templates/page.jsx
+new file mode 100644
+index 0000000..9cb5edc
+--- /dev/null
++++ b/app/templates/page.jsx
+@@ -0,0 +1,73 @@
++import Link from 'next/link';
++import { Users } from 'lucide-react';
++import Header from '@/components/Header';
++import UserMenu from '@/components/UserMenu';
++import { getSession } from '@/lib/auth';
++import { listPublicCharts } from '@/lib/charts';
++
++export const metadata = { title: 'เทมเพลต — Mandala AI' };
++
++export default async function TemplatesPage() {
++  const [session, charts] = await Promise.all([getSession(), listPublicCharts()]);
++  const userId = session.user.id;
++
++  return (
++    <main className="min-h-dvh flex flex-col bg-cream">
++      <Header
++        logoHref="/gallery"
++        navLinks={[{ href: '/gallery', label: 'Chart ของฉัน' }, { href: '/templates', label: 'เทมเพลต' }]}
++        activeNav="/templates"
++        right={<UserMenu />}
++      />
++
++      <div className="flex-1 overflow-y-auto px-4 md:px-10 py-5 md:py-8">
++        <div className="max-w-5xl mx-auto flex flex-col gap-5">
++          <div>
++            <h1 className="font-display font-semibold text-xl md:text-2xl">เทมเพลตจากผู้ใช้</h1>
++            <p className="text-[13px] text-muted mt-1">
++              Mandala Chart ที่คนอื่นเปิดเป็นสาธารณะ เลือกอันที่ใช่แล้วกด &ldquo;ใช้ Chart นี้&rdquo; เพื่อนำไปปรับเป็นของคุณ
++            </p>
++          </div>
++
++          {charts.length === 0 ? (
++            <p className="text-[13px] text-muted text-center py-10 rounded-[20px] bg-white shadow-soft">
++              ยังไม่มีใครแชร์ Chart — เปิด Chart ของคุณเป็นสาธารณะได้จากปุ่ม &ldquo;แชร์&rdquo; ในหน้า Chart
++            </p>
++          ) : (
++            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
++              {charts.map((c) => (
++                <Link key={c.id} href={`/p/${c.id}`} className="tap-hover tap flex flex-col gap-2.5 p-4 md:p-5 rounded-[20px] bg-white shadow-soft">
++                  <div className="flex items-center gap-1.5 flex-wrap">
++                    {c.category && (
++                      <span className="text-[10px] font-bold text-muted bg-chip px-2.5 py-0.5 rounded-full">{c.category}</span>
++                    )}
++                    {c.ownerId === userId && (
++                      <span className="text-[10px] font-bold text-lavender-text bg-lavender-bg px-2.5 py-0.5 rounded-full">ของคุณ</span>
++                    )}
++                  </div>
++                  <span className="font-display font-semibold text-sm md:text-[15px] leading-snug">{c.title}</span>
++                  <div className="flex flex-wrap gap-1">
++                    {c.subgoalTitles.slice(0, 4).map((t) => (
++                      <span key={t} className="text-[10.5px] text-muted bg-cream px-2 py-0.5 rounded-full truncate max-w-[140px]">
++                        {t}
++                      </span>
++                    ))}
++                    {c.subgoalTitles.length > 4 && (
++                      <span className="text-[10.5px] text-faint px-1 py-0.5">+{c.subgoalTitles.length - 4}</span>
++                    )}
++                  </div>
++                  <div className="flex items-center justify-between text-[11px] text-muted mt-auto pt-1">
++                    <span className="truncate">โดย {c.ownerName} • ทำไปแล้ว {c.percent}%</span>
++                    <span className="flex items-center gap-1 flex-shrink-0">
++                      <Users size={11} /> {c.copyCount}
++                    </span>
++                  </div>
++                </Link>
++              ))}
++            </div>
++          )}
++        </div>
++      </div>
++    </main>
++  );
++}
+diff --git a/components/CopyChartButton.jsx b/components/CopyChartButton.jsx
+new file mode 100644
+index 0000000..bd786a2
+--- /dev/null
++++ b/components/CopyChartButton.jsx
+@@ -0,0 +1,38 @@
++'use client';
++
++import { useState, useTransition } from 'react';
++import { CopyPlus, Loader2 } from 'lucide-react';
++import { copyPublicChart } from '@/app/actions/charts';
++
++export default function CopyChartButton({ chartId, className = '' }) {
++  const [pending, startTransition] = useTransition();
++  const [error, setError] = useState('');
++
++  function copy() {
++    setError('');
++    startTransition(async () => {
++      try {
++        // Redirects to the new copy on success.
++        await copyPublicChart(chartId);
++      } catch (e) {
++        if (e?.digest?.startsWith('NEXT_REDIRECT')) throw e;
++        setError('คัดลอกไม่สำเร็จ — Chart นี้อาจถูกปิดสาธารณะไปแล้ว');
++      }
++    });
++  }
++
++  return (
++    <div className={'flex flex-col gap-1.5 ' + className}>
++      <button
++        type="button"
++        onClick={copy}
++        disabled={pending}
++        className="tap flex items-center justify-center gap-2 px-5 py-3.5 rounded-2xl bg-coral shadow-coral text-white disabled:opacity-70"
++      >
++        {pending ? <Loader2 size={16} className="animate-spin" /> : <CopyPlus size={16} />}
++        <span className="font-display font-semibold text-sm">ใช้ Chart นี้</span>
++      </button>
++      {error && <p role="alert" className="text-[12px] font-semibold text-red-600">{error}</p>}
++    </div>
++  );
++}
+diff --git a/components/GalleryView.jsx b/components/GalleryView.jsx
+new file mode 100644
+index 0000000..d3e5e76
+--- /dev/null
++++ b/components/GalleryView.jsx
+@@ -0,0 +1,186 @@
++'use client';
++
++import { useMemo, useState } from 'react';
++import Link from 'next/link';
++import { Plus, LayoutGrid, Rows3, ChevronRight, ChevronDown, Sparkles, Globe, LayoutTemplate } from 'lucide-react';
++import Header from '@/components/Header';
++import MiniHeatmap from '@/components/MiniHeatmap';
++import ProgressRing from '@/components/ProgressRing';
++import NotifyBell from '@/components/NotifyBell';
++import UserMenu from '@/components/UserMenu';
++import InstallPrompt from '@/components/InstallPrompt';
++
++const FILTERS = [
++  { id: 'active', label: 'กำลังทำ' },
++  { id: 'all', label: 'ทั้งหมด' },
++  { id: 'done', label: 'เสร็จแล้ว' },
++];
++
++function ChartCard({ chart, view, seed }) {
++  if (view === 'compact') {
++    return (
++      <Link
++        href={`/chart/${chart.id}`}
++        className="tap flex items-center gap-3 py-3 border-b border-line"
++      >
++        <ProgressRing percent={chart.percent} size={34} stroke={4} showLabel={false} />
++        <div className="flex-1 min-w-0">
++          <div className="text-[13px] font-semibold truncate">{chart.title}</div>
++          <div className="text-[10.5px] text-muted">{chart.category ? `${chart.category} • ` : ''}อัปเดต {chart.updated}</div>
++        </div>
++        <span className="flex-shrink-0 text-[13px] font-bold text-muted">{chart.percent}%</span>
++      </Link>
++    );
++  }
++  return (
++    <Link
++      href={`/chart/${chart.id}`}
++      className="tap-hover tap flex items-center gap-4 md:gap-5 p-4 md:p-5 rounded-[20px] bg-white shadow-soft"
++    >
++      <div className="flex-1 min-w-0 flex flex-col gap-1.5">
++        <div className="flex items-center gap-1.5">
++          {chart.category && (
++            <span className="text-[10px] font-bold text-muted bg-chip px-2.5 py-0.5 rounded-full">{chart.category}</span>
++          )}
++          {chart.isPublic && (
++            <span className="flex items-center gap-1 text-[10px] font-bold text-lavender-text bg-lavender-bg px-2.5 py-0.5 rounded-full">
++              <Globe size={10} /> สาธารณะ
++            </span>
++          )}
++        </div>
++        <span className="font-display font-semibold text-sm md:text-[15px] leading-snug">{chart.title}</span>
++        <div className="flex items-center gap-2">
++          <div className="flex-1 h-1.5 rounded-full bg-chip overflow-hidden">
++            <div className="h-full bg-coral rounded-full" style={{ width: `${chart.percent}%` }} />
++          </div>
++          <span className="text-[11px] font-bold text-muted">{chart.percent}%</span>
++        </div>
++        <span className="text-[10px] text-faint">อัปเดต {chart.updated}</span>
++      </div>
++      <MiniHeatmap seed={seed} />
++    </Link>
++  );
++}
++
++export default function GalleryView({ charts, reminderCandidates }) {
++  const [filter, setFilter] = useState('active');
++  const [view, setView] = useState('card');
++  const [doneOpen, setDoneOpen] = useState(false);
++
++  const active = useMemo(() => charts.filter((c) => c.status === 'active'), [charts]);
++  const done = useMemo(() => charts.filter((c) => c.status === 'done'), [charts]);
++
++  const shown = filter === 'active' ? active : filter === 'done' ? done : charts;
++
++  return (
++    <main className="min-h-dvh flex flex-col bg-cream">
++      <Header
++        logoHref="/gallery"
++        navLinks={[{ href: '/gallery', label: 'Chart ของฉัน' }, { href: '/templates', label: 'เทมเพลต' }, { href: '#', label: 'การตั้งค่า' }]}
++        activeNav="/gallery"
++        right={
++          <>
++            <NotifyBell candidates={reminderCandidates} />
++            <button
++              type="button"
++              aria-label="สลับมุมมอง"
++              onClick={() => setView((v) => (v === 'card' ? 'compact' : 'card'))}
++              className="w-9 h-9 rounded-full bg-chip flex items-center justify-center"
++            >
++              {view === 'card' ? <Rows3 size={16} className="text-muted" /> : <LayoutGrid size={16} className="text-muted" />}
++            </button>
++            <Link
++              href="/new"
++              aria-label="สร้างเป้าหมายใหม่"
++              className="w-9 h-9 rounded-full bg-coral text-white flex items-center justify-center shadow-coral"
++            >
++              <Plus size={18} strokeWidth={2.5} />
++            </Link>
++            <UserMenu />
++          </>
++        }
++      />
++
++      <div className="flex-1 overflow-y-auto px-4 md:px-10 py-5 md:py-8">
++        <div className="max-w-5xl mx-auto flex flex-col gap-5">
++          <div className="flex items-center justify-between flex-wrap gap-3">
++            <div>
++              <h1 className="font-display font-semibold text-xl md:text-2xl">Mandala Chart ของฉัน</h1>
++              <p className="text-[13px] text-muted mt-1">คุณมีทั้งหมด {charts.length} เป้าหมาย</p>
++            </div>
++            <div className="flex gap-2">
++              {FILTERS.map((f) => (
++                <button
++                  key={f.id}
++                  type="button"
++                  onClick={() => setFilter(f.id)}
++                  className={
++                    'text-xs font-bold px-4 py-2 rounded-full ' +
++                    (filter === f.id ? 'bg-coral text-white' : 'bg-chip text-muted')
++                  }
++                >
++                  {f.label}
++                </button>
++              ))}
++            </div>
++          </div>
++
++          <InstallPrompt />
++
++          <Link
++            href="/new"
++            className="tap flex items-center gap-3 p-4 rounded-[20px] bg-lavender-bg"
++          >
++            <span className="w-10 h-10 rounded-full bg-lavender text-white flex items-center justify-center flex-shrink-0">
++              <Sparkles size={18} />
++            </span>
++            <div>
++              <div className="font-display font-semibold text-sm text-lavender-dark">สร้างเป้าหมายใหม่</div>
++              <div className="text-xs text-lavender-text">ให้ AI ช่วยวางแผนตั้งแต่ต้น</div>
++            </div>
++          </Link>
++
++          {charts.length === 0 ? (
++            <div className="flex flex-col items-center gap-3 text-center py-10 px-6 rounded-[20px] bg-white shadow-soft">
++              <span className="font-display font-semibold text-base">ยังไม่มี Mandala Chart</span>
++              <p className="text-[13px] text-muted max-w-sm">
++                สร้างเป้าหมายแรกของคุณเอง หรือเลือกเทมเพลตจาก Chart ที่คนอื่นแชร์ไว้แล้วนำมาปรับใช้
++              </p>
++              <Link href="/templates" className="tap flex items-center gap-2 px-4 py-2.5 rounded-full bg-chip text-[13px] font-bold text-coral">
++                <LayoutTemplate size={14} /> ดูเทมเพลต
++              </Link>
++            </div>
++          ) : shown.length === 0 ? (
++            <p className="text-[13px] text-muted text-center py-6">ไม่มี Chart ในหมวดนี้</p>
++          ) : (
++            <div className={view === 'card' ? 'grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4' : 'flex flex-col'}>
++              {shown.map((c, i) => (
++                <ChartCard key={c.id} chart={c} view={view} seed={i * 3} />
++              ))}
++            </div>
++          )}
++
++          {filter === 'active' && done.length > 0 && (
++            <div className="rounded-2xl bg-chip overflow-hidden">
++              <button
++                type="button"
++                onClick={() => setDoneOpen((v) => !v)}
++                className="w-full flex items-center justify-between px-4 py-3.5"
++              >
++                <span className="text-[13px] font-bold text-muted">เสร็จแล้ว ({done.length})</span>
++                {doneOpen ? <ChevronDown size={16} className="text-muted" /> : <ChevronRight size={16} className="text-muted" />}
++              </button>
++              {doneOpen && (
++                <div className={'px-4 pb-4 ' + (view === 'card' ? 'grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4' : 'flex flex-col')}>
++                  {done.map((c, i) => (
++                    <ChartCard key={c.id} chart={c} view={view} seed={i * 3 + 9} />
++                  ))}
++                </div>
++              )}
++            </div>
++          )}
++        </div>
++      </div>
++    </main>
++  );
++}
+diff --git a/components/NotifyBell.jsx b/components/NotifyBell.jsx
+index e2c8e03..b1817b3 100644
+--- a/components/NotifyBell.jsx
++++ b/components/NotifyBell.jsx
+@@ -3,7 +3,20 @@
+ import { useEffect, useState } from 'react';
+ import { useRouter } from 'next/navigation';
+ import { Bell, BellRing } from 'lucide-react';
+-import { randomDailyAction } from '@/lib/data';
++
++// Weighted random pick — charts touched recently carry a higher `weight`, so a
++// streak you're building comes up more often without the quieter charts ever
++// dropping out entirely.
++function pickDailyAction(candidates) {
++  if (!candidates?.length) return null;
++  const total = candidates.reduce((sum, c) => sum + c.weight, 0);
++  let roll = Math.random() * total;
++  for (const c of candidates) {
++    roll -= c.weight;
++    if (roll <= 0) return c;
++  }
++  return candidates[candidates.length - 1];
++}
+ 
+ function isIos() {
+   if (typeof navigator === 'undefined') return false;
+@@ -15,7 +28,8 @@ function isStandalone() {
+   return window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
+ }
+ 
+-export default function NotifyBell() {
++// `candidates` come from the server: unfinished actions across the user's active charts.
++export default function NotifyBell({ candidates = [] }) {
+   const router = useRouter();
+   const [supported, setSupported] = useState(true);
+   const [permission, setPermission] = useState('default');
+@@ -49,7 +63,7 @@ export default function NotifyBell() {
+       return;
+     }
+ 
+-    const action = randomDailyAction();
++    const action = pickDailyAction(candidates);
+     setHint('');
+ 
+     if (!action) {
+diff --git a/components/ShareButton.jsx b/components/ShareButton.jsx
+new file mode 100644
+index 0000000..2936239
+--- /dev/null
++++ b/components/ShareButton.jsx
+@@ -0,0 +1,131 @@
++'use client';
++
++import { useState, useTransition } from 'react';
++import Link from 'next/link';
++import { Check, Copy, Eye, EyeOff, Globe, Lock, Share2, Users } from 'lucide-react';
++import Drawer from '@/components/Drawer';
++import { setChartPublic } from '@/app/actions/charts';
++
++export default function ShareButton({ chartId, initialPublic, copyCount }) {
++  const [open, setOpen] = useState(false);
++  const [isPublic, setIsPublic] = useState(initialPublic);
++  const [copied, setCopied] = useState(false);
++  const [error, setError] = useState('');
++  const [pending, startTransition] = useTransition();
++
++  const publicPath = `/p/${chartId}`;
++
++  function toggle() {
++    const next = !isPublic;
++    setError('');
++    startTransition(async () => {
++      try {
++        await setChartPublic(chartId, next);
++        setIsPublic(next);
++      } catch {
++        setError('บันทึกไม่สำเร็จ ลองใหม่อีกครั้ง');
++      }
++    });
++  }
++
++  async function copyLink() {
++    try {
++      await navigator.clipboard.writeText(window.location.origin + publicPath);
++      setCopied(true);
++      setTimeout(() => setCopied(false), 2000);
++    } catch {
++      setError('คัดลอกไม่ได้ ลองคัดลอกลิงก์ด้วยตัวเอง');
++    }
++  }
++
++  return (
++    <>
++      <button
++        type="button"
++        onClick={() => setOpen(true)}
++        className={
++          'tap flex items-center gap-1.5 h-8 px-3 rounded-full flex-shrink-0 text-[12px] font-bold ' +
++          (isPublic ? 'bg-lavender-bg text-lavender-text' : 'bg-chip text-muted')
++        }
++      >
++        {isPublic ? <Globe size={13} /> : <Share2 size={13} />}
++        {isPublic ? 'สาธารณะ' : 'แชร์'}
++      </button>
++
++      <Drawer open={open} onClose={() => setOpen(false)} title="แชร์ Chart นี้" subtitle="การแชร์">
++        <div className="flex flex-col gap-5">
++          <button
++            type="button"
++            onClick={toggle}
++            disabled={pending}
++            aria-pressed={isPublic}
++            className="tap flex items-center gap-3 p-4 rounded-2xl bg-cream text-left disabled:opacity-60"
++          >
++            <span
++              className={
++                'w-10 h-10 rounded-full flex items-center justify-center flex-shrink-0 ' +
++                (isPublic ? 'bg-coral text-white' : 'bg-white text-muted')
++              }
++            >
++              {isPublic ? <Globe size={18} /> : <Lock size={18} />}
++            </span>
++            <span className="flex-1 min-w-0">
++              <span className="block text-sm font-bold">{isPublic ? 'เปิดเป็นสาธารณะอยู่' : 'ส่วนตัว'}</span>
++              <span className="block text-[12px] text-muted">
++                {isPublic ? 'ทุกคนที่มีลิงก์ดูได้ และอยู่ในหน้าเทมเพลต' : 'เห็นได้แค่คุณคนเดียว'}
++              </span>
++            </span>
++            <span className={'w-11 h-6 rounded-full p-0.5 flex-shrink-0 transition-colors ' + (isPublic ? 'bg-coral' : 'bg-line')}>
++              <span className={'block w-5 h-5 rounded-full bg-white shadow transition-transform ' + (isPublic ? 'translate-x-5' : '')} />
++            </span>
++          </button>
++
++          <div className="flex flex-col gap-2.5">
++            <span className="text-[11px] font-bold text-muted">คนอื่นจะเห็นอะไร</span>
++            <Row icon={<Eye size={14} />} ok text="เป้าหมาย หัวข้อย่อย และ action ทั้งหมด" />
++            <Row icon={<Eye size={14} />} ok text="% ความคืบหน้ารวม และของแต่ละหัวข้อย่อย" />
++            <Row icon={<EyeOff size={14} />} text="action ไหนทำแล้ว / ยังไม่ทำ, บันทึก และขั้นตอนย่อย" />
++            <Row icon={<Users size={14} />} ok text="คนอื่นกด “ใช้ Chart นี้” เพื่อคัดลอกไปเริ่มใหม่ในบัญชีตัวเองได้" />
++          </div>
++
++          {isPublic && (
++            <div className="flex flex-col gap-2">
++              <span className="text-[11px] font-bold text-muted">ลิงก์สาธารณะ</span>
++              <div className="flex gap-2">
++                <button
++                  type="button"
++                  onClick={copyLink}
++                  className="tap flex-1 flex items-center justify-center gap-2 py-3 rounded-2xl bg-coral text-white text-[13px] font-bold"
++                >
++                  {copied ? <Check size={14} /> : <Copy size={14} />}
++                  {copied ? 'คัดลอกแล้ว' : 'คัดลอกลิงก์'}
++                </button>
++                <Link
++                  href={publicPath}
++                  className="tap flex items-center justify-center px-4 rounded-2xl bg-chip text-[13px] font-bold text-muted"
++                >
++                  ดูตัวอย่าง
++                </Link>
++              </div>
++              <span className="text-[11px] text-faint">มีคนนำไปใช้แล้ว {copyCount} ครั้ง</span>
++            </div>
++          )}
++
++          {error && <p role="alert" className="text-[12.5px] font-semibold text-red-600">{error}</p>}
++        </div>
++      </Drawer>
++    </>
++  );
++}
++
++function Row({ icon, text, ok = false }) {
++  return (
++    <div className="flex items-start gap-2.5 text-[13px]">
++      <span className={'mt-0.5 flex-shrink-0 ' + (ok ? 'text-coral' : 'text-faint')}>{icon}</span>
++      <span className={ok ? 'text-ink' : 'text-muted'}>
++        {!ok && <span className="font-bold">ไม่เห็น: </span>}
++        {text}
++      </span>
++    </div>
++  );
++}
+diff --git a/components/SubgoalEditor.jsx b/components/SubgoalEditor.jsx
+new file mode 100644
+index 0000000..f609275
+--- /dev/null
++++ b/components/SubgoalEditor.jsx
+@@ -0,0 +1,379 @@
++'use client';
++
++import { useEffect, useRef, useState } from 'react';
++import { Check, Sparkles, Plus, X, Wand2 } from 'lucide-react';
++import Header from '@/components/Header';
++import Drawer from '@/components/Drawer';
++import UserMenu from '@/components/UserMenu';
++import { suggestAction, suggestSubtaskPlan } from '@/lib/data';
++import { saveAction } from '@/app/actions/charts';
++
++const LEGEND = [
++  { label: 'เสร็จแล้ว', dot: 'bg-coral' },
++  { label: 'กำลังทำ', dot: 'bg-white border-2 border-coral' },
++  { label: 'ยังไม่ได้เพิ่ม', dot: 'bg-white border-2 border-dashed border-line' },
++];
++
++// When an action has sub-steps, its status is derived from them instead of
++// being toggled directly — finish all the small steps and the box closes itself.
++function effectiveStatus(action) {
++  if (action.subtasks && action.subtasks.length > 0) {
++    const doneN = action.subtasks.filter((s) => s.done).length;
++    if (doneN === action.subtasks.length) return 'done';
++    if (doneN > 0) return 'pending';
++    return action.label ? 'pending' : 'empty';
++  }
++  return action.status;
++}
++
++function newSubtask() {
++  return { id: Date.now().toString(36) + Math.random().toString(36).slice(2, 7), text: '', done: false };
++}
++
++const SAVE_DELAY = 500;
++
++export default function SubgoalEditor({ chartId, subgoal, subIndex }) {
++  const [actions, setActions] = useState(subgoal.actions);
++  const [openIndex, setOpenIndex] = useState(null);
++  const [saveState, setSaveState] = useState('saved'); // saved | saving | error
++
++  // Debounced autosave per action; anything still pending is flushed on unmount.
++  const pending = useRef({});
++  const timers = useRef({});
++
++  function flush(id) {
++    const a = pending.current[id];
++    if (!a) return;
++    delete pending.current[id];
++    clearTimeout(timers.current[id]);
++    saveAction(id, { label: a.label, note: a.note, subtasks: a.subtasks, status: effectiveStatus(a) })
++      .then(() => {
++        if (Object.keys(pending.current).length === 0) setSaveState('saved');
++      })
++      .catch(() => setSaveState('error'));
++  }
++
++  function scheduleSave(a) {
++    pending.current[a.id] = a;
++    setSaveState('saving');
++    clearTimeout(timers.current[a.id]);
++    timers.current[a.id] = setTimeout(() => flush(a.id), SAVE_DELAY);
++  }
++
++  useEffect(() => () => Object.keys(pending.current).forEach(flush), []); // eslint-disable-line react-hooks/exhaustive-deps
++
++  // Applies `fn` to the actions matching `pred` and queues a save for each one that changed.
++  function mutate(pred, fn) {
++    setActions((prev) => {
++      const next = prev.map((a, idx) => (pred(a, idx) ? fn(a, idx) : a));
++      next.forEach((a, idx) => a !== prev[idx] && scheduleSave(a));
++      return next;
++    });
++  }
++  const at = (i) => (_, idx) => idx === i;
++
++  const doneCount = actions.filter((a) => effectiveStatus(a) === 'done').length;
++
++  function updateAction(i, patch) {
++    mutate(at(i), (a) => ({ ...a, ...patch }));
++  }
++  function addSubtask(i) {
++    mutate(at(i), (a) => ({ ...a, subtasks: [...a.subtasks, newSubtask()] }));
++  }
++  function updateSubtask(i, subId, patch) {
++    mutate(at(i), (a) => ({ ...a, subtasks: a.subtasks.map((s) => (s.id === subId ? { ...s, ...patch } : s)) }));
++  }
++  function removeSubtask(i, subId) {
++    mutate(at(i), (a) => ({ ...a, subtasks: a.subtasks.filter((s) => s.id !== subId) }));
++  }
++
++  // Big "manage the whole plan" button: make sure there's a topic, then
++  // generate a fresh, right-sized checklist for it in one go.
++  function aiManageWholePlan(i) {
++    mutate(at(i), (a, idx) => {
++      const label = a.label || suggestAction(idx);
++      const plan = suggestSubtaskPlan().map((text) => ({ ...newSubtask(), text }));
++      return { ...a, label, status: 'pending', subtasks: plan };
++    });
++  }
++
++  // Gentler version: add a batch of AI-suggested steps onto whatever
++  // checklist already exists, instead of replacing it.
++  function aiAddSubtasks(i) {
++    mutate(at(i), (a) => {
++      const extra = suggestSubtaskPlan().map((text) => ({ ...newSubtask(), text }));
++      return { ...a, subtasks: [...a.subtasks, ...extra] };
++    });
++  }
++
++  function fillAll() {
++    mutate(
++      (a) => effectiveStatus(a) === 'empty',
++      (a, idx) => ({ ...a, status: 'pending', label: suggestAction(idx) })
++    );
++  }
++
++  const first4 = actions.slice(0, 4);
++  const last4 = actions.slice(4);
++  const active = openIndex === null ? null : actions[openIndex];
++
++  return (
++    <main className="min-h-dvh flex flex-col bg-cream">
++      <Header
++        backHref={`/chart/${chartId}`}
++        title={subgoal.title}
++        right={
++          <>
++            <SaveBadge state={saveState} />
++            <UserMenu className="hidden sm:block" />
++          </>
++        }
++      />
++
++      <div className="flex-1 overflow-y-auto px-4 md:px-10 py-5 md:py-8">
++        <div className="max-w-3xl mx-auto flex flex-col gap-5">
++          <div className="flex items-center gap-3 p-3.5 rounded-2xl bg-white shadow-soft self-start">
++            <div className="grid grid-cols-3 gap-[3px]">
++              {Array.from({ length: 9 }, (_, i) => {
++                let color = '#EDF2F9';
++                if (i === 4) color = '#0B5CB8';
++                else {
++                  const otherIndex = i < 4 ? i : i - 1;
++                  if (otherIndex === subIndex) color = '#1E9BE8';
++                }
++                return <div key={i} className="w-2 h-2 rounded-sm" style={{ background: color }} />;
++              })}
++            </div>
++            <span className="text-xs font-semibold text-muted">ตำแหน่งของคุณในแผนทั้งหมด</span>
++          </div>
++
++          <div className="flex flex-col gap-2">
++            <h1 className="font-display font-semibold text-lg md:text-xl">{subgoal.title}</h1>
++            <div className="h-3 rounded-full bg-chip overflow-hidden">
++              <div className="h-full bg-coral rounded-full transition-all" style={{ width: `${(doneCount / 8) * 100}%` }} />
++            </div>
++            <div className="flex items-center justify-between flex-wrap gap-2">
++              <span className="text-xs font-semibold text-muted">{doneCount} จาก 8 การกระทำเสร็จแล้ว</span>
++              <div className="flex items-center gap-3.5">
++                {LEGEND.map((l) => (
++                  <span key={l.label} className="flex items-center gap-1.5 text-[11px] text-muted">
++                    <span className={'w-2.5 h-2.5 rounded-full flex-shrink-0 ' + l.dot} />
++                    {l.label}
++                  </span>
++                ))}
++              </div>
++            </div>
++          </div>
++
++          <div className="grid grid-cols-3 gap-2.5">
++            {first4.map((a, i) => (
++              <ActionCell key={a.id} action={a} onOpen={() => setOpenIndex(i)} />
++            ))}
++            <div className="aspect-square rounded-2xl bg-lavender-bg2 flex flex-col items-center justify-center gap-1 p-2 text-center">
++              <span className="font-display font-semibold text-[13px] text-lavender-dark leading-tight">{subgoal.title}</span>
++              <span className="text-[11px] text-lavender-text">8 การกระทำ</span>
++            </div>
++            {last4.map((a, i) => (
++              <ActionCell key={a.id} action={a} onOpen={() => setOpenIndex(i + 4)} />
++            ))}
++          </div>
++
++          <button
++            type="button"
++            onClick={fillAll}
++            className="tap flex items-center justify-center gap-2 py-3.5 rounded-2xl bg-lavender shadow-lavenderGlow"
++          >
++            <Sparkles size={15} className="text-white" />
++            <span className="font-display font-semibold text-sm text-white">ให้ AI ช่วยคิด action ที่เหลือ</span>
++          </button>
++        </div>
++      </div>
++
++      <Drawer
++        open={openIndex !== null}
++        onClose={() => setOpenIndex(null)}
++        subtitle={subgoal.title}
++        title={`การกระทำข้อที่ ${openIndex !== null ? openIndex + 1 : ''}`}
++      >
++        {active && (
++          <div className="flex flex-col gap-5">
++            {active.subtasks.length === 0 ? (
++              <label className="flex items-center gap-3 p-3.5 rounded-2xl bg-cream cursor-pointer">
++                <input
++                  type="checkbox"
++                  checked={active.status === 'done'}
++                  onChange={(e) => updateAction(openIndex, { status: e.target.checked ? 'done' : active.label ? 'pending' : 'empty' })}
++                  className="w-5 h-5 rounded-md accent-[#0B5CB8] flex-shrink-0"
++                />
++                <span className="text-sm font-semibold">ทำข้อนี้เสร็จแล้ว</span>
++              </label>
++            ) : (
++              <div className="p-3.5 rounded-2xl bg-cream flex items-center justify-between">
++                <span className="text-sm font-semibold">
++                  {active.subtasks.filter((s) => s.done).length} จาก {active.subtasks.length} ขั้นตอนย่อยเสร็จแล้ว
++                </span>
++                {effectiveStatus(active) === 'done' && (
++                  <span className="w-6 h-6 rounded-full bg-coral flex items-center justify-center flex-shrink-0">
++                    <Check size={12} strokeWidth={3} className="text-white" />
++                  </span>
++                )}
++              </div>
++            )}
++
++            <div className="flex flex-col gap-2">
++              <span className="text-[11px] font-bold text-muted">รายละเอียด action</span>
++              <textarea
++                value={active.label}
++                onChange={(e) =>
++                  updateAction(openIndex, {
++                    label: e.target.value,
++                    status: e.target.value ? (active.status === 'empty' ? 'pending' : active.status) : 'empty',
++                  })
++                }
++                placeholder="พิมพ์สิ่งที่จะทำ เช่น อ่าน docs React 15 นาที"
++                rows={3}
++                className="w-full bg-white border border-line rounded-2xl p-3.5 text-sm font-semibold placeholder:text-faint placeholder:font-medium resize-none shadow-soft"
++              />
++              <button
++                type="button"
++                onClick={() => updateAction(openIndex, { label: suggestAction(openIndex), status: 'pending' })}
++                className="tap self-start flex items-center gap-2 px-3.5 py-2 rounded-full bg-lavender-bg"
++              >
++                <Sparkles size={12} className="text-lavender-text" />
++                <span className="text-[12px] font-bold text-lavender-text">ให้ AI แนะนำให้</span>
++              </button>
++              <button
++                type="button"
++                onClick={() => aiManageWholePlan(openIndex)}
++                className="tap flex items-center justify-center gap-2 py-3 rounded-2xl bg-lavender shadow-lavenderGlow"
++              >
++                <Wand2 size={14} className="text-white" />
++                <span className="font-display font-semibold text-[13px] text-white">ให้ AI จัดการแผนทั้งหมด</span>
++              </button>
++              <span className="text-[11px] text-faint -mt-1">ใส่แค่หัวข้อด้านบน แล้วให้ AI คิดทั้ง description และขั้นตอนย่อยให้ครบ</span>
++            </div>
++
++            <div className="flex flex-col gap-2.5">
++              <div className="flex items-center justify-between">
++                <span className="text-[11px] font-bold text-muted">
++                  ขั้นตอนย่อย {active.subtasks.length > 0 ? `(${active.subtasks.length})` : '(ถ้าต้องการแบ่งเป็นหลายขั้น)'}
++                </span>
++              </div>
++
++              {active.subtasks.map((s) => (
++                <div key={s.id} className="flex items-center gap-2.5">
++                  <input
++                    type="checkbox"
++                    checked={s.done}
++                    onChange={(e) => updateSubtask(openIndex, s.id, { done: e.target.checked })}
++                    className="w-[18px] h-[18px] rounded accent-[#0B5CB8] flex-shrink-0"
++                  />
++                  <input
++                    value={s.text}
++                    onChange={(e) => updateSubtask(openIndex, s.id, { text: e.target.value })}
++                    placeholder="พิมพ์ขั้นตอนย่อย"
++                    className={
++                      'flex-1 min-w-0 bg-transparent text-[13px] font-semibold placeholder:text-faint placeholder:font-medium ' +
++                      (s.done ? 'line-through text-faint' : 'text-ink')
++                    }
++                  />
++                  <button
++                    type="button"
++                    aria-label="ลบขั้นตอนนี้"
++                    onClick={() => removeSubtask(openIndex, s.id)}
++                    className="tap flex-shrink-0 w-6 h-6 rounded-full bg-chip flex items-center justify-center"
++                  >
++                    <X size={11} className="text-muted" />
++                  </button>
++                </div>
++              ))}
++
++              <div className="flex items-center gap-4">
++                <button
++                  type="button"
++                  onClick={() => addSubtask(openIndex)}
++                  className="tap flex items-center gap-1.5 text-[12px] font-bold text-muted"
++                >
++                  <Plus size={13} /> เพิ่มขั้นตอนย่อย
++                </button>
++                <button
++                  type="button"
++                  onClick={() => aiAddSubtasks(openIndex)}
++                  className="tap flex items-center gap-1.5 text-[12px] font-bold text-lavender-text"
++                >
++                  <Sparkles size={12} /> ให้ AI ช่วยคิดเพิ่ม
++                </button>
++              </div>
++            </div>
++
++            <div className="flex flex-col gap-2">
++              <span className="text-[11px] font-bold text-muted">บันทึกเพิ่มเติม (ถ้ามี)</span>
++              <textarea
++                value={active.note}
++                onChange={(e) => updateAction(openIndex, { note: e.target.value })}
++                placeholder="เช่น ลิงก์อ้างอิง หรือเหตุผลที่ตั้งข้อนี้"
++                rows={2}
++                className="w-full bg-cream rounded-2xl p-3.5 text-[13px] placeholder:text-faint resize-none"
++              />
++            </div>
++
++            <button
++              type="button"
++              onClick={() => setOpenIndex(null)}
++              className="tap flex items-center justify-center py-3.5 rounded-2xl bg-coral shadow-coral mt-1"
++            >
++              <span className="font-display font-semibold text-sm text-white">เสร็จสิ้น</span>
++            </button>
++          </div>
++        )}
++      </Drawer>
++    </main>
++  );
++}
++
++function SaveBadge({ state }) {
++  const text = { saved: 'บันทึกแล้ว', saving: 'กำลังบันทึก…', error: 'บันทึกไม่สำเร็จ' }[state];
++  return (
++    <span className={'text-[11px] font-semibold ' + (state === 'error' ? 'text-red-200' : 'text-white/70')} role="status">
++      {text}
++    </span>
++  );
++}
++
++function ActionCell({ action, onOpen }) {
++  const status = effectiveStatus(action);
++  const isEmpty = status === 'empty';
++  const subTotal = action.subtasks?.length || 0;
++  const subDone = subTotal ? action.subtasks.filter((s) => s.done).length : 0;
++
++  return (
++    <button
++      type="button"
++      onClick={onOpen}
++      className={
++        'tap aspect-square rounded-2xl p-2.5 flex flex-col justify-between text-left ' +
++        (isEmpty ? 'bg-white border-2 border-dashed border-line' : 'bg-white shadow-soft')
++      }
++    >
++      <div className="flex justify-end">
++        {status === 'done' ? (
++          <span className="w-[18px] h-[18px] rounded-full bg-coral flex items-center justify-center flex-shrink-0">
++            <Check size={10} strokeWidth={3} className="text-white" />
++          </span>
++        ) : status === 'pending' ? (
++          <span className="w-[18px] h-[18px] rounded-full border-2 border-coral flex-shrink-0" />
++        ) : (
++          <span className="text-[9px] font-bold text-lavender-text bg-lavender-bg px-2 py-0.5 rounded-full flex items-center gap-1">
++            <Sparkles size={9} /> AI
++          </span>
++        )}
++      </div>
++      <div className="flex flex-col gap-0.5">
++        <span className={'text-[11px] font-semibold leading-snug ' + (status === 'done' ? 'text-faint' : isEmpty ? 'text-muted' : 'text-ink')}>
++          {isEmpty ? '+ เพิ่ม action' : action.label}
++        </span>
++        {subTotal > 0 && <span className="text-[10px] font-bold text-muted">{subDone}/{subTotal} ขั้นตอนย่อย</span>}
++      </div>
++    </button>
++  );
++}
+diff --git a/lib/charts.js b/lib/charts.js
+new file mode 100644
+index 0000000..711320d
+--- /dev/null
++++ b/lib/charts.js
+@@ -0,0 +1,206 @@
++import 'server-only';
++import { prisma } from '@/lib/prisma';
++
++// Server-side data access for Mandala Charts. Every read here returns plain
++// objects shaped for the UI (percent, hints, lowercase statuses) so pages
++// don't deal with Prisma rows directly.
++
++export const SLOTS = 8;
++
++const FULL_INCLUDE = {
++  subgoals: {
++    orderBy: { position: 'asc' },
++    include: { actions: { orderBy: { position: 'asc' } } },
++  },
++};
++
++function percentOf(actions) {
++  const done = actions.filter((a) => a.status === 'DONE').length;
++  return Math.round((done / SLOTS) * 100);
++}
++
++function chartPercent(subgoals) {
++  if (subgoals.length === 0) return 0;
++  const total = subgoals.reduce((sum, s) => sum + percentOf(s.actions), 0);
++  return Math.round(total / subgoals.length);
++}
++
++function nextStepHint(actions) {
++  const next = actions.find((a) => a.status === 'pending');
++  if (next) return next.label;
++  if (actions.some((a) => a.status === 'empty')) return 'ยังไม่มี action ที่รออยู่ — เพิ่ม action ใหม่ 1 ข้อ';
++  return 'ทำ action ครบแล้ว! ไปทำตามเงื่อนไขวิธีผ่านได้เลย';
++}
++
++// "2 ชม.ที่แล้ว" style label for the gallery cards.
++export function timeAgo(date) {
++  const mins = Math.floor((Date.now() - new Date(date).getTime()) / 60000);
++  if (mins < 1) return 'เมื่อสักครู่';
++  if (mins < 60) return `${mins} นาทีที่แล้ว`;
++  const hours = Math.floor(mins / 60);
++  if (hours < 24) return `${hours} ชม.ที่แล้ว`;
++  const days = Math.floor(hours / 24);
++  if (days === 1) return 'เมื่อวาน';
++  if (days < 7) return `${days} วันก่อน`;
++  if (days < 30) return `${Math.floor(days / 7)} สัปดาห์ก่อน`;
++  return `${Math.floor(days / 30)} เดือนก่อน`;
++}
++
++function shapeAction(a) {
++  return {
++    id: a.id,
++    label: a.label,
++    status: a.status.toLowerCase(),
++    note: a.note,
++    subtasks: Array.isArray(a.subtasks) ? a.subtasks : [],
++  };
++}
++
++// Full chart for its owner — everything, including hints and progress.
++function shapeOwnerChart(chart) {
++  const percent = chartPercent(chart.subgoals);
++  return {
++    id: chart.id,
++    title: chart.title,
++    category: chart.category,
++    isPublic: chart.isPublic,
++    copyCount: chart.copyCount,
++    percent,
++    status: percent === 100 ? 'done' : 'active',
++    updatedAt: chart.updatedAt.toISOString(),
++    subgoals: chart.subgoals.map((s) => {
++      const actions = s.actions.map(shapeAction);
++      return {
++        id: s.id,
++        num: s.position + 1,
++        title: s.title,
++        percent: percentOf(s.actions),
++        actions,
++        // One hint per dot: when it's done → what to do next → what to do when stuck.
++        hints: [
++          s.passHint ? { label: 'วิธีผ่าน', text: s.passHint } : null,
++          { label: 'ก้าวถัดไป', text: nextStepHint(actions) },
++          s.stuckHint ? { label: 'ถ้าติดอยู่', text: s.stuckHint } : null,
++        ],
++      };
++    }),
++  };
++}
++
++export async function getUserCharts(userId) {
++  const charts = await prisma.chart.findMany({
++    where: { ownerId: userId },
++    orderBy: { updatedAt: 'desc' },
++    include: FULL_INCLUDE,
++  });
++  return charts.map(shapeOwnerChart);
++}
++
++// Returns null when the chart doesn't exist or isn't owned by this user,
++// so callers can 404 without leaking whether the id exists.
++export async function getOwnedChart(chartId, userId) {
++  const chart = await prisma.chart.findFirst({ where: { id: chartId, ownerId: userId }, include: FULL_INCLUDE });
++  return chart ? shapeOwnerChart(chart) : null;
++}
++
++// What other people see on /p/[id]: structure + the owner's percentages only.
++// Deliberately omits action statuses, notes, subtasks and the paid "ถ้าติดอยู่" hint.
++export async function getPublicChart(chartId) {
++  const chart = await prisma.chart.findFirst({
++    where: { id: chartId, isPublic: true },
++    include: { ...FULL_INCLUDE, owner: { select: { name: true } } },
++  });
++  if (!chart) return null;
++  return {
++    id: chart.id,
++    ownerId: chart.ownerId,
++    ownerName: chart.owner.name || 'ผู้ใช้ Mandala AI',
++    title: chart.title,
++    category: chart.category,
++    copyCount: chart.copyCount,
++    publishedAt: chart.publishedAt?.toISOString() ?? null,
++    percent: chartPercent(chart.subgoals),
++    subgoals: chart.subgoals.map((s) => ({
++      id: s.id,
++      title: s.title,
++      percent: percentOf(s.actions),
++      passHint: s.passHint,
++      actions: s.actions.filter((a) => a.label).map((a) => ({ id: a.id, label: a.label })),
++    })),
++  };
++}
++
++export async function listPublicCharts({ take = 60 } = {}) {
++  const charts = await prisma.chart.findMany({
++    where: { isPublic: true },
++    orderBy: [{ copyCount: 'desc' }, { publishedAt: 'desc' }],
++    take,
++    include: { ...FULL_INCLUDE, owner: { select: { name: true } } },
++  });
++  return charts.map((c) => ({
++    id: c.id,
++    ownerId: c.ownerId,
++    ownerName: c.owner.name || 'ผู้ใช้ Mandala AI',
++    title: c.title,
++    category: c.category,
++    copyCount: c.copyCount,
++    percent: chartPercent(c.subgoals),
++    subgoalTitles: c.subgoals.map((s) => s.title),
++  }));
++}
++
++// Everything the reminder bell may pick from: unfinished actions in unfinished
++// charts, weighted by how recently the chart was touched.
++export function dailyActionCandidates(charts) {
++  return charts
++    .filter((c) => c.status === 'active')
++    .flatMap((chart) => {
++      const days = (Date.now() - new Date(chart.updatedAt).getTime()) / 86400000;
++      const weight = days < 1 ? 3 : days < 3 ? 2 : 1;
++      return chart.subgoals.flatMap((s) =>
++        s.actions
++          .filter((a) => a.label && a.status !== 'done')
++          .map((a) => ({
++            id: a.id,
++            label: a.label,
++            chartId: chart.id,
++            chartTitle: chart.title,
++            subgoalId: s.id,
++            subgoalTitle: s.title,
++            weight,
++          }))
++      );
++    });
++}
++
++// Nested create payload for a chart with 8 sub-goals × 8 actions.
++// `subgoals` items: { title, passHint?, stuckHint?, actions?: [{ label, status?, note?, subtasks? }] }
++export function chartCreateData({ ownerId, title, category, subgoals, copiedFromId }) {
++  return {
++    ownerId,
++    title,
++    category: category || null,
++    copiedFromId: copiedFromId || null,
++    subgoals: {
++      create: subgoals.slice(0, SLOTS).map((s, position) => ({
++        position,
++        title: s.title,
++        passHint: s.passHint || null,
++        stuckHint: s.stuckHint || null,
++        actions: {
++          create: Array.from({ length: SLOTS }, (_, i) => {
++            const a = s.actions?.[i] || {};
++            const label = (a.label || '').trim();
++            return {
++              position: i,
++              label,
++              status: label ? a.status || 'PENDING' : 'EMPTY',
++              note: a.note || '',
++              subtasks: a.subtasks || [],
++            };
++          }),
++        },
++      })),
++    },
++  };
++}
+diff --git a/lib/data.js b/lib/data.js
+index fcb6b49..7373deb 100644
+--- a/lib/data.js
++++ b/lib/data.js
+@@ -1,6 +1,6 @@
+-// Mock data for the prototype. No backend yet — everything lives here so
+-// every page reads from one consistent source. Swap this file for real
+-// API calls once the backend exists; the components don't need to change.
++// Static lists and mock "AI" helpers for the prototype. Charts themselves now
++// live in the database (see lib/charts.js); the sample charts are seeded from
++// prisma/sample-charts.js.
+ 
+ export const CATEGORIES = ['อาชีพการงาน', 'สุขภาพ', 'การเงิน', 'ความสัมพันธ์', 'การเรียนรู้'];
+ 
+@@ -15,140 +15,6 @@ export const SUBGOAL_TITLES = [
+   'Soft skills',
+ ];
+ 
+-const SUBGOAL_PERCENTS = [65, 40, 80, 25, 55, 90, 35, 60];
+-
+-// "วิธีผ่าน" hint per sub-goal — the first of the 3 hint dots on each card.
+-const SUBGOAL_PASS_HINTS = [
+-  'ทำ action ให้ครบ 8 ข้อ และส่งโปรเจกต์ที่ใช้ React + API จริงได้ 1 ชิ้น',
+-  'อ่านจบ 4 เล่ม พร้อมสรุปสั้น ๆ เล่มละ 1 หน้า',
+-  'ออกกำลังกายอย่างน้อย 3 ครั้ง/สัปดาห์ ต่อเนื่อง 8 สัปดาห์',
+-  'รู้จักคนในสายงานใหม่ 10 คน และเข้าร่วม meetup อย่างน้อย 2 ครั้ง',
+-  'เช็กอินอารมณ์ทุกวัน และมีวันพักจริง ๆ สัปดาห์ละ 1 วัน',
+-  'ออมได้ 20% ของรายได้ติดต่อกัน 3 เดือน',
+-  'มีโปรเจกต์ในพอร์ต 3 ชิ้น พร้อม README และ demo ที่เปิดดูได้',
+-  'ได้ feedback ด้านการสื่อสารจากเพื่อนร่วมงาน 3 คน และนำไปปรับใช้',
+-];
+-
+-const CODING_ACTIONS = [
+-  { label: 'อ่าน docs React 15 นาที', status: 'done' },
+-  { label: 'ทำโจทย์ JavaScript 1 ข้อ', status: 'done' },
+-  { label: 'ดูคลิปสอน TypeScript', status: 'pending' },
+-  { label: 'สร้าง component ใหม่', status: 'pending' },
+-  { label: '', status: 'empty' },
+-  { label: '', status: 'empty' },
+-  { label: '', status: 'empty' },
+-  { label: '', status: 'empty' },
+-];
+-
+-// "ถ้าติดอยู่" hint — the smallest version that still counts, for low-energy days.
+-const SUBGOAL_STUCK_HINTS = [
+-  'ไม่มีเวลา? ลดเหลือวันละ 10 นาที เขียน component เล็ก ๆ 1 ตัวก็นับแล้ว',
+-  'อ่านไม่ไหว? อ่านแค่ 5 หน้า แล้วจดประโยคที่ชอบ 1 ประโยค',
+-  'ไม่มีแรง? เดินเร็ว 15 นาที หรือยืดเหยียด 5 นาทีก็นับ',
+-  'ไม่กล้าทัก? เริ่มจากคอมเมนต์โพสต์คนในสายงาน 1 คนก่อน',
+-  'รู้สึกหนัก? หายใจลึก ๆ 3 นาที แล้วเขียนความรู้สึกสั้น ๆ 1 บรรทัด',
+-  'เดือนนี้ช็อต? ออมให้ได้แม้ 50 บาท เพื่อรักษานิสัยไว้',
+-  'ไม่รู้จะทำอะไร? เอาโปรเจกต์เก่ามาเขียน README ให้ดีขึ้นก่อน',
+-  'ไม่มีโอกาสพูด? ฝึกสรุปงานวันนี้ให้เพื่อนฟังใน 1 นาที',
+-];
+-
+-function nextStepHint(actions) {
+-  const next = actions.find((a) => a.status === 'pending');
+-  if (next) return next.label;
+-  if (actions.some((a) => a.status === 'empty')) return 'ยังไม่มี action ที่รออยู่ — เพิ่ม action ใหม่ 1 ข้อ';
+-  return 'ทำ action ครบแล้ว! ไปทำตามเงื่อนไขวิธีผ่านได้เลย';
+-}
+-
+-function slugify(text) {
+-  return text
+-    .toLowerCase()
+-    .replace(/[^\p{L}\p{N}]+/gu, '-')
+-    .replace(/(^-|-$)/g, '');
+-}
+-
+-function makeActions(percent) {
+-  const doneCount = Math.round((percent / 100) * 4);
+-  const actions = [];
+-  for (let i = 0; i < 8; i++) {
+-    let status = 'empty';
+-    if (i < doneCount) status = 'done';
+-    else if (i < doneCount + 2) status = 'pending';
+-    actions.push({
+-      id: 'a' + i,
+-      label: status === 'empty' ? '' : `แผนปฏิบัติข้อที่ ${i + 1}`,
+-      status,
+-    });
+-  }
+-  return actions;
+-}
+-
+-function makeSubgoals() {
+-  return SUBGOAL_TITLES.map((title, i) => {
+-    const id = slugify(title) || 's' + i;
+-    const percent = SUBGOAL_PERCENTS[i];
+-    const actions = i === 0 ? CODING_ACTIONS.map((a, j) => ({ id: 'a' + j, ...a })) : makeActions(percent);
+-    // One hint per dot: when it's done → what to do next → what to do when stuck.
+-    const hints = [
+-      { label: 'วิธีผ่าน', text: SUBGOAL_PASS_HINTS[i] },
+-      { label: 'ก้าวถัดไป', text: nextStepHint(actions) },
+-      { label: 'ถ้าติดอยู่', text: SUBGOAL_STUCK_HINTS[i] },
+-    ];
+-    return { id, num: i + 1, title, percent, actions, hints };
+-  });
+-}
+-
+-export const CHARTS = [
+-  {
+-    id: 'fullstack',
+-    title: 'เป็น Full-stack Developer ภายใน 1 ปี',
+-    category: 'อาชีพการงาน',
+-    percent: 58,
+-    updated: '2 ชม.ที่แล้ว',
+-    status: 'active',
+-    momentum: 3, // checked in most recently — weighted higher for notifications
+-    subgoals: makeSubgoals(),
+-  },
+-  {
+-    id: 'health',
+-    title: 'สุขภาพกายปี 2026',
+-    category: 'สุขภาพ',
+-    percent: 20,
+-    updated: 'เมื่อวาน',
+-    status: 'active',
+-    momentum: 2,
+-    subgoals: makeSubgoals(),
+-  },
+-  {
+-    id: 'reading',
+-    title: 'อ่านหนังสือ 24 เล่ม',
+-    category: 'การเรียนรู้',
+-    percent: 75,
+-    updated: '3 วันก่อน',
+-    status: 'active',
+-    momentum: 1, // gone quiet a few days — still eligible, just weighted lower
+-    subgoals: makeSubgoals(),
+-  },
+-  {
+-    id: 'japanese',
+-    title: 'เรียนภาษาญี่ปุ่นเบื้องต้น',
+-    category: 'การเรียนรู้',
+-    percent: 100,
+-    updated: '2 สัปดาห์ก่อน',
+-    status: 'done',
+-    momentum: 0,
+-    subgoals: makeSubgoals(),
+-  },
+-];
+-
+-export function getChart(id) {
+-  return CHARTS.find((c) => c.id === id) || CHARTS[0];
+-}
+-
+-export function getSubgoal(chartId, subId) {
+-  const chart = getChart(chartId);
+-  return chart.subgoals.find((s) => s.id === subId) || chart.subgoals[0];
+-}
+-
+ // A small pool of alternate phrasings so the "regenerate" buttons in the
+ // prototype have something plausible-looking to swap in. A real backend
+ // would call an LLM here instead.
+@@ -236,39 +102,3 @@ export function heatColorFor(percent) {
+   if (percent >= 25) return HEAT_RAMP[1];
+   return HEAT_RAMP[0];
+ }
+-
+-// Picks 1 action to surface as today's reminder, across every ACTIVE chart
+-// (a finished chart has nothing left worth nudging about, so it's excluded
+-// entirely). Charts are weighted by `momentum` so one you checked into
+-// recently is more likely to come up than one you haven't touched in days —
+-// this keeps a streak you're building without ever fully dropping the
+-// quieter charts (they can still be picked, just less often).
+-//
+-// Returns enough context to both write a chart-aware notification body and
+-// deep-link the click straight to that sub-goal:
+-// { chartId, chartTitle, subgoalId, subgoalTitle, id, label }
+-export function randomDailyAction() {
+-  const candidates = CHARTS.filter((c) => c.status === 'active').flatMap((chart) =>
+-    chart.subgoals.flatMap((s) =>
+-      s.actions
+-        .filter((a) => a.label && a.status !== 'done')
+-        .map((a) => ({
+-          ...a,
+-          chartId: chart.id,
+-          chartTitle: chart.title,
+-          subgoalId: s.id,
+-          subgoalTitle: s.title,
+-          weight: Math.max(chart.momentum, 1),
+-        }))
+-    )
+-  );
+-  if (candidates.length === 0) return null;
+-
+-  const totalWeight = candidates.reduce((sum, c) => sum + c.weight, 0);
+-  let roll = Math.random() * totalWeight;
+-  for (const c of candidates) {
+-    roll -= c.weight;
+-    if (roll <= 0) return c;
+-  }
+-  return candidates[candidates.length - 1];
+-}
+diff --git a/middleware.js b/middleware.js
+index 57682c1..5503070 100644
+--- a/middleware.js
++++ b/middleware.js
+@@ -27,5 +27,5 @@ export async function middleware(req) {
+ }
+ 
+ export const config = {
+-  matcher: ['/login', '/register', '/gallery/:path*', '/chart/:path*', '/new/:path*', '/admin/:path*'],
++  matcher: ['/login', '/register', '/gallery/:path*', '/chart/:path*', '/new/:path*', '/templates/:path*', '/admin/:path*'],
+ };
+diff --git a/prisma/sample-charts.js b/prisma/sample-charts.js
+new file mode 100644
+index 0000000..960b30c
+--- /dev/null
++++ b/prisma/sample-charts.js
+@@ -0,0 +1,108 @@
++// Sample Mandala Charts used by the seed so a fresh database has something to
++// look at (and one public chart for the templates page).
++//
++// Each sub-goal: { title, passHint?, stuckHint?, done, labels? }
++//  - `done`   how many of the 8 actions start ticked (drives the % shown)
++//  - `labels` explicit action labels; otherwise generic ones are generated
++
++const SLOTS = 8;
++
++function actions({ done, labels }) {
++  const filled = Math.max(labels?.length || 0, Math.min(SLOTS, done + 2));
++  return Array.from({ length: SLOTS }, (_, i) => {
++    const label = labels?.[i] || (i < filled ? `แผนปฏิบัติข้อที่ ${i + 1}` : '');
++    return { label, status: !label ? 'EMPTY' : i < done ? 'DONE' : 'PENDING' };
++  });
++}
++
++const FULLSTACK = {
++  title: 'เป็น Full-stack Developer ภายใน 1 ปี',
++  category: 'อาชีพการงาน',
++  isPublic: true,
++  subgoals: [
++    {
++      title: 'ทักษะเขียนโค้ด',
++      done: 2,
++      labels: ['อ่าน docs React 15 นาที', 'ทำโจทย์ JavaScript 1 ข้อ', 'ดูคลิปสอน TypeScript', 'สร้าง component ใหม่'],
++      passHint: 'ทำ action ให้ครบ 8 ข้อ และส่งโปรเจกต์ที่ใช้ React + API จริงได้ 1 ชิ้น',
++      stuckHint: 'ไม่มีเวลา? ลดเหลือวันละ 10 นาที เขียน component เล็ก ๆ 1 ตัวก็นับแล้ว',
++    },
++    {
++      title: 'อ่านหนังสือเทคนิค',
++      done: 3,
++      passHint: 'อ่านจบ 4 เล่ม พร้อมสรุปสั้น ๆ เล่มละ 1 หน้า',
++      stuckHint: 'อ่านไม่ไหว? อ่านแค่ 5 หน้า แล้วจดประโยคที่ชอบ 1 ประโยค',
++    },
++    {
++      title: 'ออกกำลังกาย',
++      done: 6,
++      passHint: 'ออกกำลังกายอย่างน้อย 3 ครั้ง/สัปดาห์ ต่อเนื่อง 8 สัปดาห์',
++      stuckHint: 'ไม่มีแรง? เดินเร็ว 15 นาที หรือยืดเหยียด 5 นาทีก็นับ',
++    },
++    {
++      title: 'สร้างเครือข่าย',
++      done: 2,
++      passHint: 'รู้จักคนในสายงานใหม่ 10 คน และเข้าร่วม meetup อย่างน้อย 2 ครั้ง',
++      stuckHint: 'ไม่กล้าทัก? เริ่มจากคอมเมนต์โพสต์คนในสายงาน 1 คนก่อน',
++    },
++    {
++      title: 'สุขภาพจิต',
++      done: 4,
++      passHint: 'เช็กอินอารมณ์ทุกวัน และมีวันพักจริง ๆ สัปดาห์ละ 1 วัน',
++      stuckHint: 'รู้สึกหนัก? หายใจลึก ๆ 3 นาที แล้วเขียนความรู้สึกสั้น ๆ 1 บรรทัด',
++    },
++    {
++      title: 'วางแผนการเงิน',
++      done: 7,
++      passHint: 'ออมได้ 20% ของรายได้ติดต่อกัน 3 เดือน',
++      stuckHint: 'เดือนนี้ช็อต? ออมให้ได้แม้ 50 บาท เพื่อรักษานิสัยไว้',
++    },
++    {
++      title: 'ทำพอร์ตโฟลิโอ',
++      done: 3,
++      passHint: 'มีโปรเจกต์ในพอร์ต 3 ชิ้น พร้อม README และ demo ที่เปิดดูได้',
++      stuckHint: 'ไม่รู้จะทำอะไร? เอาโปรเจกต์เก่ามาเขียน README ให้ดีขึ้นก่อน',
++    },
++    {
++      title: 'Soft skills',
++      done: 5,
++      passHint: 'ได้ feedback ด้านการสื่อสารจากเพื่อนร่วมงาน 3 คน และนำไปปรับใช้',
++      stuckHint: 'ไม่มีโอกาสพูด? ฝึกสรุปงานวันนี้ให้เพื่อนฟังใน 1 นาที',
++    },
++  ],
++};
++
++const simple = (title, category, subgoalTitles, doneEach) => ({
++  title,
++  category,
++  subgoals: subgoalTitles.map((t, i) => ({ title: t, done: doneEach[i] })),
++});
++
++const SAMPLE_CHARTS = [
++  FULLSTACK,
++  simple(
++    'สุขภาพกายปี 2026',
++    'สุขภาพ',
++    ['วิ่ง 5 กม.', 'นอนให้ครบ 7 ชม.', 'ลดน้ำตาล', 'ดื่มน้ำ 2 ลิตร/วัน', 'เวทเทรนนิ่ง', 'ตรวจสุขภาพประจำปี', 'ยืดเหยียดทุกเช้า', 'ลดเวลาหน้าจอ'],
++    [2, 1, 2, 3, 1, 0, 2, 1]
++  ),
++  simple(
++    'อ่านหนังสือ 24 เล่ม',
++    'การเรียนรู้',
++    ['นิยาย', 'ธุรกิจ', 'จิตวิทยา', 'ประวัติศาสตร์', 'วิทยาศาสตร์', 'พัฒนาตัวเอง', 'ภาษาอังกฤษ', 'ชมรมหนังสือ'],
++    [6, 7, 5, 6, 6, 7, 5, 6]
++  ),
++  simple(
++    'เรียนภาษาญี่ปุ่นเบื้องต้น',
++    'การเรียนรู้',
++    ['ฮิรางานะ', 'คาตากานะ', 'คำศัพท์ N5', 'ไวยากรณ์ N5', 'ฟังพอดแคสต์', 'คุยกับเจ้าของภาษา', 'ดูอนิเมะไม่มีซับ', 'สอบ N5'],
++    [8, 8, 8, 8, 8, 8, 8, 8]
++  ),
++];
++
++module.exports = {
++  SAMPLE_CHARTS: SAMPLE_CHARTS.map((c) => ({
++    ...c,
++    subgoals: c.subgoals.map(({ done, labels, ...s }) => ({ ...s, actions: actions({ done, labels }) })),
++  })),
++};
+diff --git a/prisma/schema.prisma b/prisma/schema.prisma
+index f19637f..daa55ae 100644
+--- a/prisma/schema.prisma
++++ b/prisma/schema.prisma
+@@ -29,6 +29,67 @@ model User {
+ 
+   accounts Account[]
+   sessions Session[]
++  charts   Chart[]
++}
++
++enum ActionStatus {
++  EMPTY
++  PENDING
++  DONE
++}
++
++// One Mandala Chart: a main goal, 8 sub-goals, 8 actions each.
++model Chart {
++  id           String    @id @default(cuid())
++  ownerId      String
++  title        String
++  category     String?
++  // Public charts can be viewed at /p/[id] and copied by other users.
++  isPublic     Boolean   @default(false)
++  publishedAt  DateTime?
++  // Set when this chart was copied from someone else's public chart.
++  copiedFromId String?
++  copyCount    Int       @default(0)
++  createdAt    DateTime  @default(now())
++  updatedAt    DateTime  @updatedAt
++
++  owner      User      @relation(fields: [ownerId], references: [id], onDelete: Cascade)
++  copiedFrom Chart?    @relation("ChartCopies", fields: [copiedFromId], references: [id], onDelete: SetNull)
++  copies     Chart[]   @relation("ChartCopies")
++  subgoals   Subgoal[]
++
++  @@index([ownerId])
++  @@index([isPublic, publishedAt])
++}
++
++model Subgoal {
++  id        String  @id @default(cuid())
++  chartId   String
++  position  Int // 0–7, reading order around the core cell
++  title     String
++  // Hint dot 1 ("วิธีผ่าน") and dot 3 ("ถ้าติดอยู่"); dot 2 is derived from actions.
++  passHint  String?
++  stuckHint String?
++
++  chart   Chart    @relation(fields: [chartId], references: [id], onDelete: Cascade)
++  actions Action[]
++
++  @@unique([chartId, position])
++}
++
++model Action {
++  id        String       @id @default(cuid())
++  subgoalId String
++  position  Int // 0–7
++  label     String       @default("")
++  status    ActionStatus @default(EMPTY)
++  note      String       @default("")
++  // [{ id, text, done }] — small checklist inside one action
++  subtasks  Json         @default("[]")
++
++  subgoal Subgoal @relation(fields: [subgoalId], references: [id], onDelete: Cascade)
++
++  @@unique([subgoalId, position])
+ }
+ 
+ // Below: the tables NextAuth's Prisma adapter expects (OAuth links, sessions).
+diff --git a/prisma/seed.js b/prisma/seed.js
+index 1ddf09a..e0e411e 100644
+--- a/prisma/seed.js
++++ b/prisma/seed.js
+@@ -1,6 +1,9 @@
+ // Creates (or promotes) the first admin from ADMIN_EMAIL / ADMIN_PASSWORD in .env.
++// With SEED_SAMPLE_CHARTS=true it also gives that admin the sample charts
++// (one of them public, so /templates isn't empty) — only if they have none yet.
+ const { PrismaClient } = require('@prisma/client');
+ const bcrypt = require('bcryptjs');
++const { SAMPLE_CHARTS } = require('./sample-charts');
+ 
+ const prisma = new PrismaClient();
+ 
+@@ -12,12 +15,42 @@ async function main() {
+     return;
+   }
+   const passwordHash = await bcrypt.hash(password, 12);
+-  await prisma.user.upsert({
++  const admin = await prisma.user.upsert({
+     where: { email },
+     update: { role: 'ADMIN' },
+     create: { email, name: 'ผู้ดูแลระบบ', passwordHash, role: 'ADMIN' },
+   });
+   console.log(`Admin ready: ${email}`);
++
++  if (process.env.SEED_SAMPLE_CHARTS === 'true') await seedSampleCharts(admin.id);
++}
++
++async function seedSampleCharts(ownerId) {
++  if (await prisma.chart.count({ where: { ownerId } })) {
++    console.log('Admin already has charts — skipping sample charts.');
++    return;
++  }
++  for (const c of SAMPLE_CHARTS) {
++    await prisma.chart.create({
++      data: {
++        ownerId,
++        title: c.title,
++        category: c.category,
++        isPublic: Boolean(c.isPublic),
++        publishedAt: c.isPublic ? new Date() : null,
++        subgoals: {
++          create: c.subgoals.map((s, position) => ({
++            position,
++            title: s.title,
++            passHint: s.passHint || null,
++            stuckHint: s.stuckHint || null,
++            actions: { create: s.actions.map((a, i) => ({ position: i, label: a.label, status: a.status })) },
++          })),
++        },
++      },
++    });
++  }
++  console.log(`Created ${SAMPLE_CHARTS.length} sample charts.`);
+ }
+ 
+ main()

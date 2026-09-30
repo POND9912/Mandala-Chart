@@ -4,7 +4,7 @@ import { useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { signIn } from 'next-auth/react';
-import { Loader2 } from 'lucide-react';
+import { Eye, EyeOff, Loader2, Lock, Mail, User } from 'lucide-react';
 
 // NextAuth error codes (from ?error= or the signIn result) → Thai messages
 const AUTH_ERRORS = {
@@ -18,11 +18,31 @@ function authError(code) {
   return code ? AUTH_ERRORS[code] || AUTH_ERRORS.Default : '';
 }
 
-function Field({ label, ...props }) {
+// 16px input text on purpose: iOS Safari zooms the page into smaller inputs.
+function Field({ label, icon: Icon, type = 'text', ...props }) {
+  const [show, setShow] = useState(false);
+  const isPassword = type === 'password';
   return (
-    <label className="block bg-cream rounded-2xl px-4 py-3.5 focus-within:ring-2 focus-within:ring-coral/40">
-      <span className="block text-[10px] font-bold text-muted mb-1">{label}</span>
-      <input {...props} className="w-full bg-transparent text-sm font-semibold placeholder:text-faint placeholder:font-medium" />
+    <label className="flex flex-col gap-1.5">
+      <span className="text-[12.5px] font-bold text-ink">{label}</span>
+      <span className="flex items-center gap-2.5 h-[52px] px-4 rounded-2xl bg-cream border border-transparent focus-within:bg-white focus-within:border-coral focus-within:ring-4 focus-within:ring-coral/10 transition">
+        <Icon size={18} className="text-muted flex-shrink-0" />
+        <input
+          {...props}
+          type={isPassword && show ? 'text' : type}
+          className="flex-1 min-w-0 h-full bg-transparent text-base font-semibold placeholder:text-faint placeholder:font-medium"
+        />
+        {isPassword && (
+          <button
+            type="button"
+            onClick={() => setShow((v) => !v)}
+            aria-label={show ? 'ซ่อนรหัสผ่าน' : 'แสดงรหัสผ่าน'}
+            className="w-8 h-8 -mr-1.5 rounded-full flex items-center justify-center text-muted hover:bg-chip flex-shrink-0"
+          >
+            {show ? <EyeOff size={17} /> : <Eye size={17} />}
+          </button>
+        )}
+      </span>
     </label>
   );
 }
@@ -44,6 +64,7 @@ export default function AuthForm({ mode, googleEnabled, callbackUrl = '/gallery'
   const [form, setForm] = useState({ name: '', email: '', password: '', confirm: '' });
   const [error, setError] = useState(authError(initialError));
   const [loading, setLoading] = useState(false);
+  const [googleNotice, setGoogleNotice] = useState(false);
 
   const set = (key) => (e) => setForm((f) => ({ ...f, [key]: e.target.value }));
 
@@ -86,19 +107,20 @@ export default function AuthForm({ mode, googleEnabled, callbackUrl = '/gallery'
   return (
     <>
       <div>
-        <h2 className="font-display font-semibold text-xl">{isRegister ? 'สร้างบัญชีใหม่' : 'ยินดีต้อนรับกลับมา'}</h2>
-        <p className="text-[13px] text-muted mt-1.5">
+        <h2 className="font-display font-semibold text-2xl">{isRegister ? 'สร้างบัญชีใหม่' : 'ยินดีต้อนรับกลับมา 👋'}</h2>
+        <p className="text-sm text-muted mt-1.5">
           {isRegister ? 'เริ่มวางแผน Mandala Chart แรกของคุณ' : 'เข้าสู่ระบบเพื่อดู Mandala Chart ของคุณ'}
         </p>
       </div>
 
       <form onSubmit={handleSubmit} className="flex flex-col gap-4">
         {isRegister && (
-          <Field label="ชื่อ" type="text" autoComplete="name" required placeholder="ชื่อของคุณ" value={form.name} onChange={set('name')} />
+          <Field label="ชื่อ" icon={User} type="text" autoComplete="name" required placeholder="ชื่อของคุณ" value={form.name} onChange={set('name')} />
         )}
-        <Field label="อีเมล" type="email" autoComplete="email" required placeholder="you@example.com" value={form.email} onChange={set('email')} />
+        <Field label="อีเมล" icon={Mail} type="email" inputMode="email" autoComplete="email" autoCapitalize="none" required placeholder="you@example.com" value={form.email} onChange={set('email')} />
         <Field
           label={isRegister ? 'รหัสผ่าน (อย่างน้อย 8 ตัวอักษร)' : 'รหัสผ่าน'}
+          icon={Lock}
           type="password"
           autoComplete={isRegister ? 'new-password' : 'current-password'}
           required
@@ -110,6 +132,7 @@ export default function AuthForm({ mode, googleEnabled, callbackUrl = '/gallery'
         {isRegister && (
           <Field
             label="ยืนยันรหัสผ่าน"
+            icon={Lock}
             type="password"
             autoComplete="new-password"
             required
@@ -128,33 +151,35 @@ export default function AuthForm({ mode, googleEnabled, callbackUrl = '/gallery'
         <button
           type="submit"
           disabled={loading}
-          className="tap flex items-center justify-center gap-2 py-3.5 rounded-2xl bg-coral shadow-coral disabled:opacity-70"
+          className="tap flex items-center justify-center gap-2 h-[52px] mt-1 rounded-2xl bg-brand shadow-coral hover:brightness-110 disabled:opacity-70 transition"
         >
           {loading && <Loader2 size={16} className="animate-spin text-white" />}
-          <span className="font-display font-semibold text-sm text-white">{isRegister ? 'สมัครสมาชิก' : 'เข้าสู่ระบบ'}</span>
+          <span className="font-display font-semibold text-base text-white">{isRegister ? 'สมัครสมาชิก' : 'เข้าสู่ระบบ'}</span>
         </button>
       </form>
 
-      {googleEnabled && (
-        <>
-          <div className="flex items-center gap-3">
-            <div className="flex-1 h-px bg-line" />
-            <span className="text-[11px] font-semibold text-faint">หรือ</span>
-            <div className="flex-1 h-px bg-line" />
-          </div>
+      <div className="flex items-center gap-3">
+        <div className="flex-1 h-px bg-line" />
+        <span className="text-[11px] font-semibold text-faint">หรือ</span>
+        <div className="flex-1 h-px bg-line" />
+      </div>
 
-          <button
-            type="button"
-            onClick={() => signIn('google', { callbackUrl })}
-            className="tap flex items-center justify-center gap-2.5 py-3.5 rounded-2xl bg-white border border-line hover:bg-cream"
-          >
-            <GoogleIcon />
-            <span className="text-[13px] font-bold">{isRegister ? 'สมัครด้วย Google' : 'เข้าสู่ระบบด้วย Google'}</span>
-          </button>
-        </>
+      {/* Always shown; until Google OAuth keys are configured it only explains that. */}
+      <button
+        type="button"
+        onClick={() => (googleEnabled ? signIn('google', { callbackUrl }) : setGoogleNotice(true))}
+        className="tap flex items-center justify-center gap-2.5 h-[52px] rounded-2xl bg-white border border-line hover:bg-cream"
+      >
+        <GoogleIcon />
+        <span className="text-[14px] font-bold">{isRegister ? 'สมัครด้วย Google' : 'เข้าสู่ระบบด้วย Google'}</span>
+      </button>
+      {googleNotice && (
+        <p role="status" className="-mt-2 text-[12.5px] font-semibold text-lavender-text bg-lavender-bg rounded-xl px-3.5 py-2.5">
+          การเข้าสู่ระบบด้วย Google จะเปิดให้ใช้เร็ว ๆ นี้ ตอนนี้ใช้อีเมลและรหัสผ่านไปก่อนนะ
+        </p>
       )}
 
-      <span className="text-center text-[12.5px] text-muted mt-1">
+      <span className="text-center text-sm text-muted mt-1">
         {isRegister ? 'มีบัญชีอยู่แล้ว? ' : 'ยังไม่มีบัญชี? '}
         <Link href={isRegister ? '/login' : '/register'} className="font-bold text-coral">
           {isRegister ? 'เข้าสู่ระบบ' : 'สมัครสมาชิก'}

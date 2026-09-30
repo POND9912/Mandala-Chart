@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from 'react';
 import Link from 'next/link';
-import { Plus, LayoutGrid, Rows3, ChevronRight, ChevronDown, Sparkles } from 'lucide-react';
+import { Plus, LayoutGrid, Rows3, ChevronRight, ChevronDown, Sparkles, Globe, Lock, Users } from 'lucide-react';
 import Header from '@/components/Header';
 import MiniHeatmap from '@/components/MiniHeatmap';
 import ProgressRing from '@/components/ProgressRing';
@@ -17,6 +17,28 @@ const FILTERS = [
   { id: 'done', label: 'เสร็จแล้ว' },
 ];
 
+// Public/private status: a small pill next to the category for shared charts,
+// and a quiet footer note on every card (copies for public, a lock for private).
+function PublicPill() {
+  return (
+    <span className="flex items-center gap-1 whitespace-nowrap text-[10px] font-bold text-white bg-lavender px-2 py-0.5 rounded-full">
+      <Globe size={10} strokeWidth={2.5} /> สาธารณะ
+    </span>
+  );
+}
+
+function VisibilityNote({ chart }) {
+  return chart.isPublic ? (
+    <span className="flex items-center gap-1 whitespace-nowrap text-[10px] font-semibold text-lavender-text">
+      <Users size={10} /> ใช้แล้ว {chart.copyCount || 0} ครั้ง
+    </span>
+  ) : (
+    <span className="flex items-center gap-1 whitespace-nowrap text-[10px] font-semibold text-faint">
+      <Lock size={10} /> ส่วนตัว
+    </span>
+  );
+}
+
 function ChartCard({ chart, view, seed }) {
   if (view === 'compact') {
     return (
@@ -26,7 +48,14 @@ function ChartCard({ chart, view, seed }) {
       >
         <ProgressRing percent={chart.percent} size={34} stroke={4} showLabel={false} />
         <div className="flex-1 min-w-0">
-          <div className="text-[13px] font-semibold truncate">{chart.title}</div>
+          <div className="flex items-center gap-1.5 min-w-0">
+            {chart.isPublic ? (
+              <Globe size={12} className="text-lavender flex-shrink-0" aria-label="สาธารณะ" />
+            ) : (
+              <Lock size={12} className="text-faint flex-shrink-0" aria-label="ส่วนตัว" />
+            )}
+            <span className="text-[13px] font-semibold truncate">{chart.title}</span>
+          </div>
           <div className="text-[10.5px] text-muted">{chart.category} • อัปเดต {chart.updated}</div>
         </div>
         <span className="flex-shrink-0 text-[13px] font-bold text-muted">{chart.percent}%</span>
@@ -39,9 +68,10 @@ function ChartCard({ chart, view, seed }) {
       className="tap-hover tap flex items-center gap-4 md:gap-5 p-4 md:p-5 rounded-[20px] bg-white shadow-soft"
     >
       <div className="flex-1 min-w-0 flex flex-col gap-1.5">
-        <span className="self-start text-[10px] font-bold text-muted bg-chip px-2.5 py-0.5 rounded-full">
-          {chart.category}
-        </span>
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <span className="whitespace-nowrap text-[10px] font-bold text-muted bg-chip px-2.5 py-0.5 rounded-full">{chart.category}</span>
+          {chart.isPublic && <PublicPill />}
+        </div>
         <span className="font-display font-semibold text-sm md:text-[15px] leading-snug">{chart.title}</span>
         <div className="flex items-center gap-2">
           <div className="flex-1 h-1.5 rounded-full bg-chip overflow-hidden">
@@ -49,7 +79,10 @@ function ChartCard({ chart, view, seed }) {
           </div>
           <span className="text-[11px] font-bold text-muted">{chart.percent}%</span>
         </div>
-        <span className="text-[10px] text-faint">อัปเดต {chart.updated}</span>
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-[10px] text-faint truncate">อัปเดต {chart.updated}</span>
+          <VisibilityNote chart={chart} />
+        </div>
       </div>
       <MiniHeatmap seed={seed} />
     </Link>
@@ -70,7 +103,7 @@ export default function GalleryPage() {
     <main className="min-h-dvh flex flex-col bg-cream">
       <Header
         logoHref="/gallery"
-        navLinks={[{ href: '/gallery', label: 'Chart ของฉัน' }, { href: '#', label: 'เทมเพลต' }, { href: '#', label: 'การตั้งค่า' }]}
+        navLinks={[{ href: '/gallery', label: 'Chart ของฉัน' }, { href: '/templates', label: 'เทมเพลต' }, { href: '#', label: 'การตั้งค่า' }]}
         activeNav="/gallery"
         right={
           <>

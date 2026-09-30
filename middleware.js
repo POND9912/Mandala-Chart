@@ -27,5 +27,5 @@ export async function middleware(req) {
 }
 
 export const config = {
-  matcher: ['/login', '/register', '/gallery/:path*', '/chart/:path*', '/new/:path*', '/admin/:path*'],
+  matcher: ['/login', '/register', '/gallery/:path*', '/chart/:path*', '/new/:path*', '/templates/:path*', '/admin/:path*'],
 };
