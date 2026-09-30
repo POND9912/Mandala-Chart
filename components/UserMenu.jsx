@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { signOut, useSession } from 'next-auth/react';
-import { LogOut, ShieldCheck } from 'lucide-react';
+import { LogOut, Settings, ShieldCheck } from 'lucide-react';
 
 // `up` opens the menu upward from the left — for the admin sidebar footer.
 export default function UserMenu({ className = '', up = false }) {
@@ -21,7 +21,7 @@ export default function UserMenu({ className = '', up = false }) {
   }, [open]);
 
   const user = session?.user;
-  if (!user) return <span className={'w-8 h-8 rounded-full bg-white/20 ' + className} />;
+  if (!user) return <span className={'w-10 h-10 rounded-full bg-white/20 ' + className} />;
 
   const isAdmin = user.role === 'ADMIN';
   const initial = (user.name || user.email || '?').trim().charAt(0).toUpperCase();
@@ -33,7 +33,7 @@ export default function UserMenu({ className = '', up = false }) {
         aria-label="เมนูผู้ใช้"
         aria-expanded={open}
         onClick={() => setOpen((o) => !o)}
-        className="tap w-8 h-8 rounded-full bg-lavender ring-2 ring-white/80 overflow-hidden flex items-center justify-center"
+        className="tap w-10 h-10 rounded-full bg-lavender ring-2 ring-white/80 hover:ring-white overflow-hidden flex items-center justify-center"
       >
         {user.image ? (
           // eslint-disable-next-line @next/next/no-img-element
@@ -63,6 +63,9 @@ export default function UserMenu({ className = '', up = false }) {
             </span>
           </div>
           <div className="h-px bg-line my-1" />
+          <Link href="/settings" className="flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-[13px] font-semibold hover:bg-chip">
+            <Settings size={15} className="text-muted" /> การตั้งค่า
+          </Link>
           {isAdmin && (
             <Link href="/admin" className="flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-[13px] font-semibold hover:bg-chip">
               <ShieldCheck size={15} className="text-coral" /> แดชบอร์ดผู้ดูแล

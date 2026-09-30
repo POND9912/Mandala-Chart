@@ -1,6 +1,6 @@
 import Link from 'next/link';
 import { ArrowRight, Flame, LayoutTemplate, Users } from 'lucide-react';
-import Header from '@/components/Header';
+import Header, { APP_NAV } from '@/components/Header';
 import UserMenu from '@/components/UserMenu';
 import { CATEGORIES, heatColorFor, listPublicCharts } from '@/lib/data';
 
@@ -43,7 +43,7 @@ export default function TemplatesPage({ searchParams }) {
     <main className="min-h-dvh flex flex-col bg-cream">
       <Header
         logoHref="/gallery"
-        navLinks={[{ href: '/gallery', label: 'Chart ของฉัน' }, { href: '/templates', label: 'เทมเพลต' }]}
+        navLinks={APP_NAV}
         activeNav="/templates"
         right={<UserMenu />}
       />

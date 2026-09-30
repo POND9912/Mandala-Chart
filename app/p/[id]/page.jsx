@@ -1,7 +1,7 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { ChevronDown, CopyPlus, Flag, Users } from 'lucide-react';
-import Header from '@/components/Header';
+import Header, { APP_NAV } from '@/components/Header';
 import ProgressRing from '@/components/ProgressRing';
 import UserMenu from '@/components/UserMenu';
 import CopyChartButton from '@/components/CopyChartButton';
@@ -47,7 +47,7 @@ export default async function PublicChartPage({ params }) {
     <main className="min-h-dvh flex flex-col bg-cream">
       <Header
         logoHref={signedIn ? '/gallery' : '/login'}
-        navLinks={signedIn ? [{ href: '/gallery', label: 'Chart ของฉัน' }, { href: '/templates', label: 'เทมเพลต' }] : null}
+        navLinks={signedIn ? APP_NAV : null}
         activeNav="/templates"
         right={
           signedIn ? (

@@ -3,7 +3,7 @@
 import { useMemo, useState } from 'react';
 import Link from 'next/link';
 import { Plus, LayoutGrid, Rows3, ChevronRight, ChevronDown, Sparkles, Globe, Lock, Users } from 'lucide-react';
-import Header from '@/components/Header';
+import Header, { APP_NAV, HEADER_BTN } from '@/components/Header';
 import MiniHeatmap from '@/components/MiniHeatmap';
 import ProgressRing from '@/components/ProgressRing';
 import NotifyBell from '@/components/NotifyBell';
@@ -103,7 +103,7 @@ export default function GalleryPage() {
     <main className="min-h-dvh flex flex-col bg-cream">
       <Header
         logoHref="/gallery"
-        navLinks={[{ href: '/gallery', label: 'Chart ของฉัน' }, { href: '/templates', label: 'เทมเพลต' }, { href: '#', label: 'การตั้งค่า' }]}
+        navLinks={APP_NAV}
         activeNav="/gallery"
         right={
           <>
@@ -111,17 +111,19 @@ export default function GalleryPage() {
             <button
               type="button"
               aria-label="สลับมุมมอง"
+              data-tip={view === 'card' ? 'ดูแบบรายการ' : 'ดูแบบการ์ด'}
               onClick={() => setView((v) => (v === 'card' ? 'compact' : 'card'))}
-              className="w-9 h-9 rounded-full bg-chip flex items-center justify-center"
+              className={HEADER_BTN + ' hidden sm:flex'}
             >
-              {view === 'card' ? <Rows3 size={16} className="text-muted" /> : <LayoutGrid size={16} className="text-muted" />}
+              {view === 'card' ? <Rows3 size={18} /> : <LayoutGrid size={18} />}
             </button>
             <Link
               href="/new"
               aria-label="สร้างเป้าหมายใหม่"
-              className="w-9 h-9 rounded-full bg-coral text-white flex items-center justify-center shadow-coral"
+              className="tap flex items-center gap-1.5 h-10 px-3 sm:px-4 rounded-full bg-white text-coral-dark font-bold text-[13px] shadow-md hover:bg-lavender-bg transition-colors"
             >
-              <Plus size={18} strokeWidth={2.5} />
+              <Plus size={18} strokeWidth={2.75} />
+              <span className="hidden sm:inline">สร้างเป้าหมาย</span>
             </Link>
             <UserMenu />
           </>

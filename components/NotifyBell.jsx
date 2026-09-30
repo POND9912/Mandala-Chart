@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Bell, BellRing } from 'lucide-react';
 import { randomDailyAction } from '@/lib/data';
+import { HEADER_BTN } from '@/components/Header';
 
 function isIos() {
   if (typeof navigator === 'undefined') return false;
@@ -86,9 +87,10 @@ export default function NotifyBell() {
         type="button"
         onClick={handleClick}
         aria-label="เปิดการแจ้งเตือนรายวัน"
-        className="tap w-9 h-9 rounded-full bg-chip flex items-center justify-center"
+        data-tip={permission === 'granted' ? 'แจ้งเตือนเปิดอยู่' : 'เปิดการแจ้งเตือน'}
+        className={HEADER_BTN}
       >
-        {permission === 'granted' ? <BellRing size={16} className="text-coral" /> : <Bell size={16} className="text-muted" />}
+        {permission === 'granted' ? <BellRing size={18} /> : <Bell size={18} />}
       </button>
       {hint && (
         <div className="absolute right-0 top-11 z-30 w-56 bg-white rounded-2xl shadow-softLg p-3.5 text-[12px] leading-relaxed">

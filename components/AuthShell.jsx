@@ -1,25 +1,5 @@
 import { Bell, Sparkles, Target } from 'lucide-react';
-
-// Brand mark: a tiny 3×3 mandala with the core cell highlighted.
-export function LogoMark({ size = 40 }) {
-  const cell = Math.round(size / 4.2);
-  const gap = Math.max(2, Math.round(size / 18));
-  return (
-    <span
-      className="inline-grid grid-cols-3 place-content-center rounded-[28%] bg-white/15 ring-1 ring-white/25 flex-shrink-0"
-      style={{ width: size, height: size, gap }}
-      aria-hidden="true"
-    >
-      {Array.from({ length: 9 }, (_, i) => (
-        <span
-          key={i}
-          className="rounded-[3px]"
-          style={{ width: cell, height: cell, background: i === 4 ? '#FFFFFF' : 'rgba(255,255,255,0.45)' }}
-        />
-      ))}
-    </span>
-  );
-}
+import LogoMark from '@/components/LogoMark';
 
 const SAMPLE = ['เขียนโค้ด', 'อ่านหนังสือ', 'ออกกำลังกาย', 'เครือข่าย', null, 'สุขภาพจิต', 'การเงิน', 'พอร์ตโฟลิโอ', 'Soft skills'];
 const SAMPLE_LEVEL = [0.9, 0.55, 1, 0.35, null, 0.7, 1, 0.45, 0.8];
@@ -90,7 +70,9 @@ export default function AuthShell({ children }) {
                 แตกเป้าหมายใหญ่ให้เป็นแผนที่ลงมือได้ทุกวัน ด้วย Mandala Chart และ AI ที่คอยช่วยทุกขั้นตอน
               </p>
             </div>
-            <SampleChart />
+            <div className="[@media(max-height:820px)]:hidden">
+              <SampleChart />
+            </div>
             <ul className="flex flex-col gap-3">
               {FEATURES.map(({ icon: Icon, text }) => (
                 <li key={text} className="flex items-center gap-3 text-[14px]">

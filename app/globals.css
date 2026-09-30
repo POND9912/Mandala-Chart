@@ -16,6 +16,35 @@ input:focus {
   outline: none;
 }
 
+/* Hover label for header icon buttons: <button class="tip" data-tip="…"> */
+@media (hover: hover) {
+  .tip {
+    position: relative;
+  }
+  .tip::after {
+    content: attr(data-tip);
+    position: absolute;
+    top: calc(100% + 8px);
+    left: 50%;
+    transform: translateX(-50%) translateY(-4px);
+    white-space: nowrap;
+    padding: 5px 10px;
+    border-radius: 10px;
+    background: #1b2a4a;
+    color: #fff;
+    font-size: 12px;
+    font-weight: 600;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.15s ease, transform 0.15s ease;
+    z-index: 60;
+  }
+  .tip:hover::after {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+}
+
 .tap {
   transition: transform 0.15s ease, box-shadow 0.15s ease;
 }
